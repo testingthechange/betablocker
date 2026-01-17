@@ -1,80 +1,71 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
+const PREVIEW_SECONDS = 40;
 export default function Product() {
   const { shareId } = useParams();
-  const [raw, setRaw] = useState(null);
+
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const [playing, setPlaying] = useState(false);
+
+  const audioRef = useRef(null);
 
   useEffect(() => {
-    let cancelled = false;
-
-    setLoading(true);
-    setErr(null);
-    setRaw(null);
-    setParsed(null);
-
     fetchManifest(shareId)
-      .then((m) => {
-        if (cancelled) return;
-        setRaw(m);
-        setParsed(validateManifest(m));
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setErr(e?.message ?? String(e));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+      .then((m) => setParsed(validateManifest(m)))
+      .catch((e) => setErr(String(e?.message || e)));
   }, [shareId]);
 
+  const tracks = parsed?.tracks || [];
+
+  const play = (i) => {
+    const a = audioRef.current;
+    const url = tracks[i]?.playbackUrl;
+    if (!a || !url) return;
+
+    a.pause();
+    a.currentTime = 0;
+    a.src = url;
+    a.play().catch(console.error);
+
+    setActiveIdx(i);
+    setPlaying(true);
+  };
+
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+
+    const cut = () => {
+      if (a.currentTime >= PREVIEW_SECONDS) {
+        a.pause();
+        a.currentTime = 0;
+        setPlaying(false);
+      }
+    };
+
+    a.addEventListener("timeupdate", cut);
+    return () => a.removeEventListener("timeupdate", cut);
+  }, []);
+
+  if (err) return <pre>{err}</pre>;
+  if (!parsed) return <div>Loading…</div>;
+
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
-      <h1 style={{ margin: 0 }}>Product</h1>
-      <div style={{ opacity: 0.6, marginTop: 8 }}>
-        shareId: <code>{shareId}</code>
-      </div>
+    <div style={{ padding: 24 }}>
+      <h1>{parsed.albumTitle}</h1>
 
-      {loading && <p style={{ marginTop: 16 }}>Loading manifest…</p>}
-
-      {err && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ color: "crimson", fontWeight: 600 }}>Manifest error</div>
-          <div style={{ marginTop: 6 }}>{err}</div>
+      {tracks.map((t, i) => (
+        <div key={i}>
+          {t.title}
+          <button onClick={() => play(i)}>Play</button>
         </div>
-      )}
+      ))}
 
-      {parsed && (
-        <div style={{ marginTop: 24 }}>
-          <h2 style={{ marginTop: 0 }}>{parsed.albumTitle}</h2>
-          <ol style={{ paddingLeft: 18 }}>
-            {parsed.tracks.map((t, i) => {
-              const title = t.title ?? t.name ?? `Track ${i + 1}`;
-              return (
-                <li key={t.id ?? `${i}-${title}`} style={{ marginBottom: 8 }}>
-                  {title} <button disabled style={{ marginLeft: 12 }}>Play</button>
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-      )}
-
-      {raw && (
-        <details style={{ marginTop: 16 }}>
-          <summary>Raw manifest (debug)</summary>
-          <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(raw, null, 2)}</pre>
-        </details>
-      )}
+      <audio ref={audioRef} data-audio="product" controls />
     </div>
   );
 }
