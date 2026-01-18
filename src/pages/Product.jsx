@@ -36,7 +36,7 @@ export default function Product() {
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  // lets us start playback immediately after a click/auto-advance
+  // autoplay intent across src swaps
   const pendingAutoplayRef = useRef(false);
 
   useEffect(() => {
@@ -49,13 +49,11 @@ export default function Product() {
         setParsed(v);
         setErr(null);
 
-        // reset state per shareId
         setActiveIdx(0);
         setPlaying(false);
         setCurTime(0);
         setDur(0);
 
-        // reset local cover
         if (lastLocalCoverRef.current) {
           try {
             URL.revokeObjectURL(lastLocalCoverRef.current);
@@ -90,6 +88,7 @@ export default function Product() {
     setDur(0);
 
     const url = activeTrack?.playbackUrl;
+
     try {
       a.pause();
       a.currentTime = 0;
@@ -118,7 +117,7 @@ export default function Product() {
     }
   }, [activeTrack?.playbackUrl]);
 
-  // wire audio events + enforce preview cap + auto-advance
+  // audio events + enforce preview cap + auto-advance playlist
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -132,6 +131,7 @@ export default function Product() {
       const t = Number(a.currentTime || 0);
       setCurTime(t);
 
+      // cap at PREVIEW_SECONDS, then advance + autoplay next track (continuous preview playlist)
       if (t >= PREVIEW_SECONDS) {
         try {
           a.pause();
@@ -140,9 +140,8 @@ export default function Product() {
           a.currentTime = 0;
         } catch {}
 
-        const nextIdx = Math.min(tracks.length - 1, activeIdx + 1);
-
-        if (nextIdx !== activeIdx) {
+        const nextIdx = activeIdx + 1;
+        if (nextIdx < tracks.length && tracks[nextIdx]?.playbackUrl) {
           pendingAutoplayRef.current = true;
           setActiveIdx(nextIdx);
         } else {
@@ -238,14 +237,14 @@ export default function Product() {
   if (!parsed) return <div style={{ padding: 24 }}>Loading…</div>;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0c0c0c", color: "#fff" }}>
+    <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#fff" }}>
       {/* GLOBAL HEADER */}
       <header
         style={{
           position: "sticky",
           top: 0,
           zIndex: 100,
-          background: "rgba(12,12,12,0.9)",
+          background: "rgba(11,11,18,0.9)",
           backdropFilter: "blur(8px)",
           borderBottom: "1px solid rgba(255,255,255,0.08)",
         }}
@@ -361,9 +360,7 @@ export default function Product() {
               {/* album info */}
               <div>
                 <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1.05 }}>Album</div>
-                <div style={{ marginTop: 10, fontSize: 14, opacity: 0.75 }}>
-                  shareId: {parsed.shareId || shareId}
-                </div>
+                <div style={{ marginTop: 10, fontSize: 14, opacity: 0.75 }}>shareId: {parsed.shareId || shareId}</div>
                 <div style={{ marginTop: 10, fontSize: 14, opacity: 0.75 }}>
                   Preview cap: <b>{PREVIEW_SECONDS}s</b>
                 </div>
@@ -447,7 +444,7 @@ export default function Product() {
                 </div>
               </div>
 
-              {/* BUY CARD (no background, just the button) */}
+              {/* BUY CARD */}
               <div style={{ padding: 0 }}>
                 <button
                   type="button"
@@ -540,7 +537,7 @@ export default function Product() {
         </div>
       </div>
 
-      {/* Bottom player (design unchanged) */}
+      {/* Bottom player */}
       <div
         style={{
           position: "fixed",
@@ -548,7 +545,7 @@ export default function Product() {
           right: 0,
           bottom: 0,
           borderTop: "1px solid rgba(255,255,255,0.08)",
-          background: "rgba(12,12,12,0.92)",
+          background: "rgba(11,11,18,0.92)",
           backdropFilter: "blur(10px)",
           padding: "10px 12px",
         }}
