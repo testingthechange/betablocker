@@ -12,6 +12,16 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function fmtHMS(totalSec) {
+  const n = Number(totalSec);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  const s = Math.floor(n % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 export default function Product() {
   const { shareId } = useParams();
 
@@ -24,6 +34,23 @@ export default function Product() {
   const [playing, setPlaying] = useState(false);
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
+
+  // HARD fallback: prevent any white/right gutter + body margins
+  useEffect(() => {
+    const prevBg = document.body.style.background;
+    const prevMargin = document.body.style.margin;
+    const prevMinH = document.body.style.minHeight;
+
+    document.body.style.background = "#07070a";
+    document.body.style.margin = "0";
+    document.body.style.minHeight = "100vh";
+
+    return () => {
+      document.body.style.background = prevBg;
+      document.body.style.margin = prevMargin;
+      document.body.style.minHeight = prevMinH;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +80,16 @@ export default function Product() {
   const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
   const activeTrack = tracks[activeIdx] || null;
 
+  const coverUrl = parsed?.coverUrl || "";
+  const albumName = parsed?.meta?.albumTitle || parsed?.albumTitle || "Album";
+  const performer = parsed?.meta?.artistName || "";
+  const releaseDate = parsed?.meta?.releaseDate || "";
+  const totalAlbumTimeSec = useMemo(() => {
+    // durationSec might be 0 today; this is where real values will land later
+    const sum = tracks.reduce((acc, t) => acc + (Number(t?.durationSec) || 0), 0);
+    return sum;
+  }, [tracks]);
+
   // keep audio src aligned
   useEffect(() => {
     const a = audioRef.current;
@@ -74,24 +111,22 @@ export default function Product() {
     } catch {}
   }, [activeTrack?.playbackUrl]);
 
-  // events + preview cap + autoplay next track on cap/end
+  // events + preview cap + continue playlist
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
     const onMeta = () => setDur(a.duration || 0);
 
-    const goNext = () => {
-      setActiveIdx((i) => {
-        const next = i + 1;
-        if (next >= tracks.length) return i;
-        return next;
-      });
-      // if we were playing, continue
-      setTimeout(() => {
-        if (!a) return;
-        if (tracks.length && playing) a.play().catch(() => {});
-      }, 0);
+    const continueIfPossible = (nextIdx) => {
+      if (nextIdx < 0 || nextIdx >= tracks.length) return false;
+      setActiveIdx(nextIdx);
+      if (playing) {
+        setTimeout(() => {
+          audioRef.current?.play().catch(() => {});
+        }, 0);
+      }
+      return true;
     };
 
     const onTime = () => {
@@ -105,10 +140,7 @@ export default function Product() {
         } catch {}
         setCurTime(0);
 
-        // continue playlist if there is a next
-        if (activeIdx < tracks.length - 1) {
-          goNext();
-        } else {
+        if (!continueIfPossible(activeIdx + 1)) {
           setPlaying(false);
         }
       }
@@ -119,9 +151,7 @@ export default function Product() {
 
     const onEnded = () => {
       setCurTime(0);
-      if (activeIdx < tracks.length - 1) {
-        goNext();
-      } else {
+      if (!continueIfPossible(activeIdx + 1)) {
         setPlaying(false);
       }
     };
@@ -186,21 +216,19 @@ export default function Product() {
     } catch {}
   };
 
-  const coverUrl = parsed?.coverUrl || "";
-
   if (err) return <pre style={{ color: "#fff", padding: 24 }}>{err}</pre>;
   if (!parsed) return <div style={{ color: "#fff", padding: 24 }}>Loading…</div>;
 
   return (
     <div
       style={{
-        width: "100%",
+        width: "100vw",
         minHeight: "100vh",
         background: "#07070a",
         color: "#fff",
       }}
     >
-      {/* single root width controller */}
+      {/* ONLY width controller */}
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
         {/* header */}
         <header
@@ -248,11 +276,6 @@ export default function Product() {
                   color: "#fff",
                   outline: "none",
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    // placeholder: later route to /shop?query=...
-                  }
-                }}
               />
             </div>
 
@@ -279,7 +302,7 @@ export default function Product() {
         </header>
 
         <div style={{ padding: "18px 16px 120px" }}>
-          <div style={{ fontSize: 44, fontWeight: 900, margin: "10px 0 6px" }}>{parsed.albumTitle}</div>
+          <div style={{ fontSize: 44, fontWeight: 900, margin: "10px 0 6px" }}>{albumName}</div>
           <div style={{ fontSize: 13, opacity: 0.7 }}>
             shareId: {parsed.shareId} · tracks: {tracks.length} · preview cap: {PREVIEW_SECONDS}s
           </div>
@@ -293,7 +316,7 @@ export default function Product() {
               alignItems: "start",
             }}
           >
-            {/* left column */}
+            {/* left */}
             <div
               style={{
                 borderRadius: 18,
@@ -331,9 +354,50 @@ export default function Product() {
               </div>
             </div>
 
-            {/* right column */}
+            {/* right */}
             <div style={{ display: "grid", gap: 14 }}>
-              {/* card 1: purchase */}
+              {/* NEW card 0: album metadata placeholders */}
+              <div
+                style={{
+                  borderRadius: 18,
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(255,255,255,0.04)",
+                  boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
+                  padding: 14,
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Album info</div>
+
+                <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ opacity: 0.75 }}>Album name</div>
+                    <div style={{ fontWeight: 700, textAlign: "right" }}>{albumName || "—"}</div>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ opacity: 0.75 }}>Performer</div>
+                    <div style={{ fontWeight: 700, textAlign: "right" }}>{performer || "—"}</div>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ opacity: 0.75 }}>Release date</div>
+                    <div style={{ fontWeight: 700, textAlign: "right" }}>{releaseDate || "—"}</div>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ opacity: 0.75 }}>Total album time</div>
+                    <div style={{ fontWeight: 700, textAlign: "right" }}>
+                      {fmtHMS(totalAlbumTimeSec) || "—"}
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6 }}>
+                    Next publish will populate these fields from manifest metadata.
+                  </div>
+                </div>
+              </div>
+
+              {/* purchase */}
               <div
                 style={{
                   borderRadius: 18,
@@ -356,16 +420,13 @@ export default function Product() {
                     fontSize: 16,
                     cursor: "pointer",
                   }}
-                  onClick={() => {
-                    // placeholder
-                    alert("Buy flow placeholder");
-                  }}
+                  onClick={() => alert("Buy flow placeholder")}
                 >
                   Buy · $19.50
                 </button>
               </div>
 
-              {/* card 2: marketing */}
+              {/* marketing */}
               <div
                 style={{
                   borderRadius: 18,
@@ -386,7 +447,7 @@ export default function Product() {
                 </div>
               </div>
 
-              {/* card 3: tracks */}
+              {/* tracks */}
               <div
                 style={{
                   borderRadius: 18,
@@ -437,11 +498,11 @@ export default function Product() {
           </div>
         </div>
 
-        {/* hidden audio (no native controls) */}
+        {/* hidden audio */}
         <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
       </div>
 
-      {/* bottom player (outside maxWidth so it spans full viewport) */}
+      {/* bottom player full width */}
       <div
         style={{
           position: "fixed",
