@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import SiteShell from "../layouts/SiteShell.jsx";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
 const PREVIEW_SECONDS = 40;
-const PREVIEW_MS = PREVIEW_SECONDS * 1000;
 
 function fmtTime(sec) {
   const n = Number(sec);
@@ -14,10 +12,19 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function sumDurationSec(tracks) {
-  let total = 0;
-  for (const t of tracks || []) total += Number(t?.durationSec || 0) || 0;
-  return total;
+function IconPlay() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M8 5v14l12-7-12-7z" fill="currentColor" />
+    </svg>
+  );
+}
+function IconPause() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M7 5h4v14H7V5zm6 0h4v14h-4V5z" fill="currentColor" />
+    </svg>
+  );
 }
 
 export default function Product() {
@@ -26,24 +33,18 @@ export default function Product() {
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState(null);
 
-  const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
-  const totalAlbumSec = useMemo(() => sumDurationSec(tracks), [tracks]);
-
-  // player state
   const audioRef = useRef(null);
-  const capTimerRef = useRef(null);
 
   const [activeIdx, setActiveIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  // fetch manifest
+  // used to decide whether to auto-continue after cap/ended
+  const playIntentRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
-
-    setParsed(null);
-    setErr(null);
 
     fetchManifest(shareId)
       .then((m) => {
@@ -51,11 +52,11 @@ export default function Product() {
         const v = validateManifest(m);
         setParsed(v);
         setErr(null);
-
         setActiveIdx(0);
         setPlaying(false);
         setCurTime(0);
         setDur(0);
+        playIntentRef.current = false;
       })
       .catch((e) => {
         if (cancelled) return;
@@ -67,28 +68,22 @@ export default function Product() {
     };
   }, [shareId]);
 
+  const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
   const activeTrack = tracks[activeIdx] || null;
 
-  function clearCapTimer() {
-    if (capTimerRef.current) window.clearTimeout(capTimerRef.current);
-    capTimerRef.current = null;
-  }
-
-  // align audio src with active track
+  // keep audio src aligned with active track
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
-    clearCapTimer();
+    const url = activeTrack?.playbackUrl;
+
     setCurTime(0);
     setDur(0);
 
-    const url = activeTrack?.playbackUrl;
     try {
       a.pause();
       a.currentTime = 0;
-      setPlaying(false);
-
       if (url) {
         a.src = url;
         a.load();
@@ -96,112 +91,98 @@ export default function Product() {
         a.removeAttribute("src");
       }
     } catch {}
+
+    // if user intended playback, continue automatically on track change
+    if (playIntentRef.current && url) {
+      setTimeout(() => {
+        const ax = audioRef.current;
+        if (!ax) return;
+        ax.play().catch(() => {});
+      }, 0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTrack?.playbackUrl]);
 
-  // wire events + preview enforcement
+  const goNext = () => setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
+  const goPrev = () => setActiveIdx((i) => Math.max(0, i - 1));
+
+  // audio events + enforce preview cap + auto-continue
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
-    const onMeta = () => {
-      const d = Number(a.duration || 0) || 0;
-      setDur(d);
-    };
-
-    const onPlay = () => {
-      setPlaying(true);
-
-      // hard cap timer (cannot be skipped if play started)
-      clearCapTimer();
-      capTimerRef.current = window.setTimeout(() => {
-        try {
-          a.pause();
-          a.currentTime = 0;
-        } catch {}
-        setPlaying(false);
-        setCurTime(0);
-
-        // auto-advance after preview ends
-        setActiveIdx((i) => {
-          const next = Math.min(tracks.length - 1, i + 1);
-          if (next !== i) {
-            // start next track after state updates
-            setTimeout(() => {
-              const aa = audioRef.current;
-              if (!aa) return;
-              aa.play().catch(() => {});
-            }, 0);
-          }
-          return next;
-        });
-      }, PREVIEW_MS);
-    };
-
-    const onPause = () => {
+    const stopAndReset = () => {
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch {}
       setPlaying(false);
-      clearCapTimer();
+      setCurTime(0);
     };
+
+    const advanceIfIntent = () => {
+      if (!playIntentRef.current) return;
+      if (activeIdx >= tracks.length - 1) {
+        playIntentRef.current = false;
+        return;
+      }
+      setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
+    };
+
+    const onMeta = () => setDur(a.duration || 0);
 
     const onTime = () => {
-      const t = Number(a.currentTime || 0) || 0;
+      const t = a.currentTime || 0;
       setCurTime(t);
 
-      // clamp currentTime display/seek behavior (doesn't stop playback by itself)
+      // LOCKED preview cap
       if (t >= PREVIEW_SECONDS) {
-        try {
-          a.currentTime = PREVIEW_SECONDS;
-        } catch {}
+        stopAndReset();
+        advanceIfIntent();
       }
     };
 
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+
     const onEnded = () => {
-      setPlaying(false);
-      clearCapTimer();
-      setCurTime(0);
-      setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-      setTimeout(() => audioRef.current?.play().catch(() => {}), 0);
+      stopAndReset();
+      advanceIfIntent();
     };
 
     a.addEventListener("loadedmetadata", onMeta);
+    a.addEventListener("timeupdate", onTime);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
-    a.addEventListener("timeupdate", onTime);
     a.addEventListener("ended", onEnded);
 
     return () => {
       a.removeEventListener("loadedmetadata", onMeta);
+      a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
-      a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("ended", onEnded);
     };
-  }, [tracks.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks.length, activeIdx]);
 
   const playIndex = (i) => {
     if (!tracks[i]?.playbackUrl) return;
+    playIntentRef.current = true;
     setActiveIdx(i);
-    setTimeout(() => audioRef.current?.play().catch(() => {}), 0);
   };
 
   const togglePlay = () => {
     const a = audioRef.current;
     if (!a || !activeTrack?.playbackUrl) return;
-    if (a.paused) a.play().catch(() => {});
-    else a.pause();
-  };
 
-  const prev = () => {
-    setActiveIdx((i) => Math.max(0, i - 1));
-    setTimeout(() => {
-      if (playing) audioRef.current?.play().catch(() => {});
-    }, 0);
-  };
-
-  const next = () => {
-    setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-    setTimeout(() => {
-      if (playing) audioRef.current?.play().catch(() => {});
-    }, 0);
+    if (a.paused) {
+      playIntentRef.current = true;
+      a.play().catch(() => {});
+    } else {
+      playIntentRef.current = false;
+      a.pause();
+    }
   };
 
   const onSeek = (e) => {
@@ -209,315 +190,306 @@ export default function Product() {
     if (!a) return;
     const v = Number(e.target.value);
     if (!Number.isFinite(v)) return;
-    const clamped = Math.max(0, Math.min(v, PREVIEW_SECONDS));
+
+    // clamp seeks to preview window (LOCKED)
+    const clamped = Math.min(v, PREVIEW_SECONDS);
     try {
       a.currentTime = clamped;
       setCurTime(clamped);
     } catch {}
   };
 
-  if (err) return <pre style={{ padding: 24 }}>{err}</pre>;
-  if (!parsed) return <div style={{ padding: 24 }}>Loading…</div>;
+  const totalAlbumTimeSec = useMemo(() => {
+    return (tracks || []).reduce((acc, t) => acc + (Number(t?.durationSec) || 0), 0);
+  }, [tracks]);
 
-  const coverUrl = String(parsed.coverUrl || "").trim();
+  if (err) return <pre style={{ whiteSpace: "pre-wrap" }}>{err}</pre>;
+  if (!parsed) return <div style={{ padding: 18 }}>Loading…</div>;
+
+  // card styles (page itself does NOT control width)
+  const card = {
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(255,255,255,0.06)",
+    borderRadius: 18,
+    boxShadow: "0 16px 40px rgba(0,0,0,0.35)",
+  };
+
+  const colGrid = {
+    display: "grid",
+    gridTemplateColumns: "65% 35%",
+    gap: 16,
+    alignItems: "start",
+  };
+
+  const coverWrap = {
+    width: "100%",
+    aspectRatio: "1 / 1",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(255,255,255,0.06)",
+    overflow: "hidden",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "rgba(255,255,255,0.60)",
+    fontWeight: 700,
+  };
+
+  const buyBtn = {
+    width: "100%",
+    border: "0",
+    borderRadius: 14,
+    padding: "14px 16px",
+    fontWeight: 900,
+    fontSize: 16,
+    color: "#08120c",
+    background: "#27d06c",
+    cursor: "pointer",
+  };
+
+  // player bar
+  const playerBar = {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderTop: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(20,20,28,0.92)",
+    backdropFilter: "blur(10px)",
+  };
+
+  const playerInner = {
+    width: "100%",
+    maxWidth: 1200,
+    margin: "0 auto",
+    padding: "12px 18px 14px",
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1fr",
+    alignItems: "center",
+    gap: 12,
+  };
+
+  const circleBtn = (disabled) => ({
+    width: 48,
+    height: 48,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: disabled ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.10)",
+    color: "rgba(255,255,255,0.92)",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const smallBtn = (disabled) => ({
+    padding: "10px 14px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.06)",
+    color: "rgba(255,255,255,0.92)",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const maxRange = Math.min(dur || 0, PREVIEW_SECONDS);
+  const rangeValue = Math.min(curTime, maxRange);
+
+  const remaining = Math.max(0, PREVIEW_SECONDS - (curTime || 0));
 
   return (
-    <SiteShell>
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "22px 16px 140px" }}>
-        {/* Two-column layout 65/35 */}
-        <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 18, alignItems: "start" }}>
-          {/* LEFT: cover + title */}
-          <div
-            style={{
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.06)",
-              borderRadius: 18,
-              overflow: "hidden",
-            }}
-          >
-            <div style={{ aspectRatio: "16 / 10", background: "rgba(255,255,255,0.08)" }}>
-              {coverUrl ? (
-                <img
-                  src={coverUrl}
-                  alt="Album cover"
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    opacity: 0.75,
-                    fontWeight: 800,
-                  }}
-                >
-                  No coverUrl in manifest
-                </div>
-              )}
+    <div style={{ paddingBottom: 120 }}>
+      {/* Page grid */}
+      <div style={colGrid}>
+        {/* LEFT: cover + album card */}
+        <div style={{ ...card, padding: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16, alignItems: "start" }}>
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Album Cover</div>
+              <div style={coverWrap}>
+                {parsed.coverUrl ? (
+                  <img
+                    src={parsed.coverUrl}
+                    alt="Album cover"
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  />
+                ) : (
+                  <div style={{ textAlign: "center", padding: 12 }}>
+                    <div style={{ fontSize: 16, marginBottom: 6 }}>No coverUrl in manifest</div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Add <code>coverUrl</code> to publish output to render it here.
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div style={{ padding: 16 }}>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>Album</div>
-              <div style={{ fontSize: 30, fontWeight: 900, letterSpacing: -0.5, marginTop: 4 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 42, fontWeight: 900, letterSpacing: -0.8, marginTop: 4 }}>
                 {parsed.albumTitle || "Album"}
               </div>
-              <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>shareId: {parsed.shareId}</div>
-            </div>
-          </div>
-
-          {/* RIGHT: cards stack */}
-          <div style={{ display: "grid", gap: 12 }}>
-            {/* Card 1: Album meta placeholders */}
-            <div
-              style={{
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                borderRadius: 18,
-                padding: 14,
-              }}
-            >
-              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>Album Info</div>
-              <div style={{ display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div style={{ opacity: 0.75 }}>Name</div>
-                  <div style={{ fontWeight: 800, textAlign: "right" }}>{parsed.meta?.albumTitle || parsed.albumTitle || "—"}</div>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div style={{ opacity: 0.75 }}>Performer</div>
-                  <div style={{ fontWeight: 800, textAlign: "right" }}>{parsed.meta?.artistName || "—"}</div>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div style={{ opacity: 0.75 }}>Release Date</div>
-                  <div style={{ fontWeight: 800, textAlign: "right" }}>{parsed.meta?.releaseDate || "—"}</div>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div style={{ opacity: 0.75 }}>Total Time</div>
-                  <div style={{ fontWeight: 800, textAlign: "right" }}>
-                    {totalAlbumSec ? fmtTime(totalAlbumSec) : "—"}
-                  </div>
-                </div>
+              <div style={{ marginTop: 6, opacity: 0.7, fontSize: 13 }}>
+                shareId: {parsed.shareId || shareId} · tracks: {tracks.length}
               </div>
-            </div>
-
-            {/* Card 2: Buy button */}
-            <div
-              style={{
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                borderRadius: 18,
-                padding: 14,
-              }}
-            >
-              <button
-                type="button"
-                style={{
-                  width: "100%",
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "12px 14px",
-                  fontWeight: 900,
-                  fontSize: 16,
-                  cursor: "pointer",
-                  background: "#22c55e",
-                  color: "#08210f",
-                }}
-              >
-                Buy $19.50
-              </button>
-            </div>
-
-            {/* Card 3: Marketing */}
-            <div
-              style={{
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                borderRadius: 18,
-                padding: 14,
-              }}
-            >
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>Included</div>
-              <div style={{ display: "grid", gap: 6, opacity: 0.9 }}>
-                <div>• 8 songs</div>
-                <div>• Smart Bridge mode</div>
-                <div>• Album mode</div>
-                <div>• Artist control</div>
-                <div>• Over 60 minutes of bonus authored bridge content</div>
-                <div>• FREE MP3 album mix download included</div>
-              </div>
-            </div>
-
-            {/* Card 4: Tracks */}
-            <div
-              style={{
-                border: "1px solid rgba(255,255,255,0.12)",
-                background: "rgba(255,255,255,0.06)",
-                borderRadius: 18,
-                padding: 14,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>Tracks</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
-              </div>
-
-              <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                {tracks.map((t, i) => {
-                  const isActive = i === activeIdx;
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => playIndex(i)}
-                      style={{
-                        textAlign: "left",
-                        padding: "10px 12px",
-                        borderRadius: 14,
-                        border: "1px solid rgba(255,255,255,0.10)",
-                        background: isActive ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)",
-                        cursor: "pointer",
-                        color: "#fff",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: 12,
-                      }}
-                    >
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {t.title}
-                      </span>
-                      <span style={{ fontSize: 12, opacity: 0.7 }}>
-                        {t.durationSec ? fmtTime(t.durationSec) : ""}
-                      </span>
-                    </button>
-                  );
-                })}
+              <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
+                Preview cap: <strong>{PREVIEW_SECONDS}s</strong>
               </div>
             </div>
           </div>
         </div>
 
-        {/* audio element (no native controls => no 3-dot menu) */}
-        <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
+        {/* RIGHT column cards */}
+        <div style={{ display: "grid", gap: 12 }}>
+          {/* Album meta placeholder card */}
+          <div style={{ ...card, padding: 16 }}>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Album Info</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+              <div style={{ opacity: 0.75 }}>Name</div>
+              <div style={{ fontWeight: 800 }}>{parsed.albumTitle || "Album"}</div>
 
-        {/* Bottom player (icons, centered Now Playing + seek bar) */}
-        <div
-          style={{
-            position: "fixed",
-            left: 0,
-            right: 0,
-            bottom: 0,
-            borderTop: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(0,0,0,0.70)",
-            backdropFilter: "blur(10px)",
-            padding: "12px 12px",
-          }}
-        >
-          <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gap: 10 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 140px", alignItems: "center", gap: 12 }}>
-              {/* Left: play/pause */}
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <button
-                  onClick={togglePlay}
-                  disabled={!activeTrack?.playbackUrl}
-                  style={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 999,
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    background: "rgba(255,255,255,0.10)",
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontSize: 18,
-                    fontWeight: 900,
-                    display: "grid",
-                    placeItems: "center",
-                  }}
-                  aria-label={playing ? "Pause" : "Play"}
-                  title={playing ? "Pause" : "Play"}
-                >
-                  {playing ? "⏸" : "▶︎"}
-                </button>
-              </div>
+              <div style={{ opacity: 0.75 }}>Performer</div>
+              <div style={{ fontWeight: 800 }}>{parsed?.meta?.artistName || "—"}</div>
 
-              {/* Center: now playing */}
-              <div style={{ textAlign: "center", minWidth: 0 }}>
-                <div style={{ fontSize: 11, opacity: 0.7, letterSpacing: 0.3 }}>NOW PLAYING</div>
-                <div
-                  style={{
-                    fontWeight: 900,
-                    fontSize: 16,
-                    marginTop: 2,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {activeTrack?.title || "—"}
-                </div>
-                <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>
-                  Preview: {PREVIEW_SECONDS}s max
-                </div>
-              </div>
+              <div style={{ opacity: 0.75 }}>Release Date</div>
+              <div style={{ fontWeight: 800 }}>{parsed?.meta?.releaseDate || "—"}</div>
 
-              {/* Right: prev/next */}
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-                <button
-                  onClick={prev}
-                  disabled={activeIdx <= 0}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    cursor: "pointer",
-                  }}
-                >
-                  Prev
-                </button>
-                <button
-                  onClick={next}
-                  disabled={activeIdx >= tracks.length - 1}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    background: "rgba(255,255,255,0.08)",
-                    color: "#fff",
-                    cursor: "pointer",
-                  }}
-                >
-                  Next
-                </button>
+              <div style={{ opacity: 0.75 }}>Total Time</div>
+              <div style={{ fontWeight: 800 }}>
+                {totalAlbumTimeSec ? fmtTime(totalAlbumTimeSec) : "—"}
               </div>
             </div>
+          </div>
 
-            {/* Centered time bar row */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 52, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
-                {fmtTime(curTime)}
-              </div>
+          {/* Buy button card */}
+          <div style={{ ...card, padding: 12 }}>
+            <button style={buyBtn} onClick={() => { /* placeholder */ }}>
+              Buy $19.50
+            </button>
+          </div>
 
-              <input
-                type="range"
-                min={0}
-                max={Math.min(Number(dur || 0) || 0, PREVIEW_SECONDS)}
-                step="0.01"
-                value={Math.min(curTime, Math.min(Number(dur || 0) || 0, PREVIEW_SECONDS))}
-                onChange={onSeek}
-                style={{ width: "100%" }}
-                disabled={!dur}
-              />
+          {/* Marketing card */}
+          <div style={{ ...card, padding: 16 }}>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Included</div>
+            <div style={{ lineHeight: 1.7, opacity: 0.9 }}>
+              • 8 songs<br />
+              • Smart Bridge mode<br />
+              • Album mode<br />
+              • Artist control<br />
+              • Over 60 minutes of bonus authored bridge content<br />
+              • FREE MP3 album mix download included
+            </div>
+          </div>
 
-              <div style={{ width: 52, fontSize: 12, opacity: 0.75 }}>
-                {fmtTime(Math.min(Number(dur || 0) || 0, PREVIEW_SECONDS))}
-              </div>
+          {/* Tracks card */}
+          <div style={{ ...card, padding: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>Tracks</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
+            </div>
+
+            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+              {tracks.map((t, i) => {
+                const isActive = i === activeIdx;
+                return (
+                  <button
+                    key={i}
+                    onClick={() => playIndex(i)}
+                    style={{
+                      textAlign: "left",
+                      padding: "12px 12px",
+                      borderRadius: 14,
+                      border: isActive ? "1px solid rgba(255,255,255,0.20)" : "1px solid rgba(255,255,255,0.10)",
+                      background: isActive ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.06)",
+                      cursor: "pointer",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 12,
+                      color: "rgba(255,255,255,0.92)",
+                    }}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>
+                      {t.title || `Track ${i + 1}`}
+                    </span>
+                    <span style={{ fontSize: 12, opacity: 0.7 }}>
+                      {t.durationSec ? fmtTime(t.durationSec) : ""}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
       </div>
-    </SiteShell>
+
+      {/* Hidden audio (no native controls) */}
+      <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
+
+      {/* Bottom player */}
+      <div style={playerBar}>
+        <div style={playerInner}>
+          {/* LEFT: play/pause */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button
+              style={circleBtn(!activeTrack?.playbackUrl)}
+              onClick={togglePlay}
+              disabled={!activeTrack?.playbackUrl}
+              aria-label={playing ? "Pause" : "Play"}
+              title={playing ? "Pause" : "Play"}
+            >
+              {playing ? <IconPause /> : <IconPlay />}
+            </button>
+
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Preview: {PREVIEW_SECONDS}s max
+            </div>
+          </div>
+
+          {/* CENTER: now playing + time */}
+          <div style={{ textAlign: "center", minWidth: 0 }}>
+            <div style={{ fontSize: 11, letterSpacing: 1.2, opacity: 0.65 }}>
+              NOW PLAYING
+            </div>
+            <div style={{ fontWeight: 900, fontSize: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {activeTrack?.title || "—"}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+              {fmtTime(rangeValue)} / {fmtTime(maxRange)} · remaining {fmtTime(remaining)}
+            </div>
+          </div>
+
+          {/* RIGHT: prev/next */}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button style={smallBtn(activeIdx <= 0)} onClick={() => { playIntentRef.current = playIntentRef.current || playing; goPrev(); }} disabled={activeIdx <= 0}>
+              Prev
+            </button>
+            <button style={smallBtn(activeIdx >= tracks.length - 1)} onClick={() => { playIntentRef.current = playIntentRef.current || playing; goNext(); }} disabled={activeIdx >= tracks.length - 1}>
+              Next
+            </button>
+          </div>
+
+          {/* Progress (full width row under grid) */}
+          <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 44, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
+              {fmtTime(rangeValue)}
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={maxRange || 0}
+              step="0.01"
+              value={rangeValue}
+              onChange={onSeek}
+              style={{ width: "100%" }}
+              disabled={!maxRange}
+            />
+            <div style={{ width: 44, fontSize: 12, opacity: 0.75 }}>
+              {fmtTime(maxRange)}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
