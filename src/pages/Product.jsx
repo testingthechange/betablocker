@@ -1,6 +1,6 @@
 // src/pages/Product.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
 const PREVIEW_SECONDS = 40;
@@ -15,12 +15,14 @@ function fmtTime(sec) {
 
 export default function Product() {
   const { shareId } = useParams();
+  const navigate = useNavigate();
 
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState(null);
 
-  // local-only cover preview (does not persist)
-  const [localCoverUrl, setLocalCoverUrl] = useState("");
+  // cover (manifest first, optional local preview fallback)
+  const [coverOverrideUrl, setCoverOverrideUrl] = useState("");
+  const coverFileRef = useRef(null);
 
   // player state
   const audioRef = useRef(null);
@@ -28,6 +30,12 @@ export default function Product() {
   const [playing, setPlaying] = useState(false);
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
+
+  // seek state (prevents frozen slider due to rapid state writes)
+  const seekingRef = useRef(false);
+
+  // preview cap uses its own timer so it cannot be bypassed
+  const capTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,10 +46,15 @@ export default function Product() {
         const v = validateManifest(m);
         setParsed(v);
         setErr(null);
+
         setActiveIdx(0);
         setPlaying(false);
         setCurTime(0);
         setDur(0);
+
+        // reset local cover override on share changes
+        setCoverOverrideUrl("");
+        if (coverFileRef.current) coverFileRef.current.value = "";
       })
       .catch((e) => {
         if (cancelled) return;
@@ -56,13 +69,39 @@ export default function Product() {
   const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
   const activeTrack = tracks[activeIdx] || null;
 
-  const coverSrc = localCoverUrl || parsed?.coverUrl || "";
+  // pick cover
+  const coverUrl = useMemo(() => {
+    const fromManifest = String(parsed?.coverUrl || "").trim();
+    return coverOverrideUrl || fromManifest || "";
+  }, [parsed?.coverUrl, coverOverrideUrl]);
+
+  // clear cap timer
+  const clearCapTimer = () => {
+    if (capTimerRef.current) window.clearTimeout(capTimerRef.current);
+    capTimerRef.current = null;
+  };
+
+  // arm cap timer after play succeeds
+  const armCapTimer = () => {
+    clearCapTimer();
+    capTimerRef.current = window.setTimeout(() => {
+      const a = audioRef.current;
+      if (!a) return;
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch {}
+      setPlaying(false);
+      setCurTime(0);
+    }, PREVIEW_SECONDS * 1000);
+  };
 
   // keep audio src aligned with active track
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
+    clearCapTimer();
     setCurTime(0);
     setDur(0);
 
@@ -70,6 +109,8 @@ export default function Product() {
     if (!url) {
       try {
         a.pause();
+        a.removeAttribute("src");
+        a.load();
       } catch {}
       setPlaying(false);
       return;
@@ -81,51 +122,79 @@ export default function Product() {
       a.src = url;
       a.load();
     } catch {}
+    // do not auto-play here; controlled by user action
   }, [activeTrack?.playbackUrl]);
 
-  // wire audio events + enforce preview cap + countdown UI
+  // wire audio events + preview cap
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
-    const onMeta = () => setDur(a.duration || 0);
+    const onMeta = () => {
+      const d = Number(a.duration || 0);
+      setDur(Number.isFinite(d) ? d : 0);
+    };
 
     const onTime = () => {
-      const t = a.currentTime || 0;
-      setCurTime(t);
+      if (seekingRef.current) return;
+      const t = Number(a.currentTime || 0);
+      setCurTime(Number.isFinite(t) ? t : 0);
 
-      // preview cap
+      // safety clamp (in case timer missed for any reason)
       if (t >= PREVIEW_SECONDS) {
         try {
           a.pause();
           a.currentTime = 0;
         } catch {}
+        clearCapTimer();
         setPlaying(false);
         setCurTime(0);
       }
     };
 
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const onPlay = () => {
+      setPlaying(true);
+      // cap only after play succeeds
+      armCapTimer();
+    };
+
+    const onPause = () => {
+      setPlaying(false);
+      clearCapTimer();
+    };
+
+    const onEnded = () => {
+      setPlaying(false);
+      clearCapTimer();
+      setCurTime(0);
+      // advance track selection (does not autoplay next)
+      setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
+    };
 
     a.addEventListener("loadedmetadata", onMeta);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
+    a.addEventListener("ended", onEnded);
 
     return () => {
       a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
+      a.removeEventListener("ended", onEnded);
     };
-  }, []);
+  }, [tracks.length]);
 
+  // controls
   const playIndex = (i) => {
     if (!tracks[i]?.playbackUrl) return;
     setActiveIdx(i);
+    // wait one tick for src effect to run
     setTimeout(() => {
-      audioRef.current?.play().catch(() => {});
+      const a = audioRef.current;
+      if (!a) return;
+      a.play().catch(() => {});
     }, 0);
   };
 
@@ -139,327 +208,433 @@ export default function Product() {
   const prev = () => setActiveIdx((i) => Math.max(0, i - 1));
   const next = () => setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
 
-  const onSeek = (e) => {
-    const a = audioRef.current;
-    if (!a) return;
+  // slider
+  const maxSeek = Math.min(dur || 0, PREVIEW_SECONDS);
+
+  const onSeekStart = () => {
+    seekingRef.current = true;
+  };
+
+  const onSeekMove = (e) => {
     const v = Number(e.target.value);
     if (!Number.isFinite(v)) return;
+    setCurTime(v);
+  };
 
-    const clamped = Math.min(v, PREVIEW_SECONDS);
+  const onSeekEnd = (e) => {
+    const a = audioRef.current;
+    seekingRef.current = false;
+    if (!a) return;
+
+    const v = Number(e.target.value);
+    const clamped = Number.isFinite(v) ? Math.min(v, PREVIEW_SECONDS) : 0;
+
     try {
       a.currentTime = clamped;
-      setCurTime(clamped);
     } catch {}
+    setCurTime(clamped);
+
+    // if seeking near/at cap, enforce stop immediately
+    if (clamped >= PREVIEW_SECONDS) {
+      try {
+        a.pause();
+        a.currentTime = 0;
+      } catch {}
+      clearCapTimer();
+      setPlaying(false);
+      setCurTime(0);
+    }
   };
 
-  const remaining = Math.max(0, PREVIEW_SECONDS - curTime);
-
-  const onPickCover = (file) => {
-    try {
-      if (!file) return;
-      const url = URL.createObjectURL(file);
-      setLocalCoverUrl(url);
-    } catch {}
+  // cover local preview upload (does not persist)
+  const onChooseCover = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    setCoverOverrideUrl((prevUrl) => {
+      if (prevUrl) {
+        try {
+          URL.revokeObjectURL(prevUrl);
+        } catch {}
+      }
+      return url;
+    });
   };
 
-  if (err) return <pre style={{ padding: 24 }}>{err}</pre>;
-  if (!parsed) return <div style={{ padding: 24, color: "#fff" }}>Loading…</div>;
+  const resetCover = () => {
+    setCoverOverrideUrl((prevUrl) => {
+      if (prevUrl) {
+        try {
+          URL.revokeObjectURL(prevUrl);
+        } catch {}
+      }
+      return "";
+    });
+    if (coverFileRef.current) coverFileRef.current.value = "";
+  };
+
+  if (err) return <pre style={{ padding: 16 }}>{err}</pre>;
+  if (!parsed) return <div style={{ padding: 16 }}>Loading…</div>;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#121212", color: "#fff" }}>
-      {/* CENTERED GLOBAL HEADER */}
+    <>
+      {/* GLOBAL HEADER (centered) */}
       <header
         style={{
           position: "sticky",
           top: 0,
           zIndex: 100,
-          background: "rgba(18,18,18,0.9)",
-          backdropFilter: "blur(8px)",
+          background: "#111",
+          color: "#fff",
           borderBottom: "1px solid #2a2a2a",
         }}
       >
-        <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "14px 16px" }}>
-          {/* center cluster */}
-          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 18 }}>
-            <Link to="/" style={{ color: "#fff", textDecoration: "none", fontWeight: 700, letterSpacing: 0.2 }}>
-              Block Radius
-            </Link>
+        <div
+          style={{
+            maxWidth: 1100,
+            margin: "0 auto",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 18,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <strong style={{ letterSpacing: 0.2 }}>Block Radius</strong>
 
-            <nav style={{ display: "flex", gap: 14, opacity: 0.9 }}>
-              <Link to="/" style={{ color: "#fff", textDecoration: "none" }}>Home</Link>
-              <Link to="/shop" style={{ color: "#fff", textDecoration: "none" }}>Shop</Link>
-              <Link to="/account" style={{ color: "#fff", textDecoration: "none" }}>Account</Link>
+            <nav style={{ display: "flex", gap: 14, opacity: 0.95 }}>
+              <Link to="/" style={{ color: "#fff", textDecoration: "none" }}>
+                Home
+              </Link>
+              <Link to="/shop" style={{ color: "#fff", textDecoration: "none" }}>
+                Shop
+              </Link>
+              <Link to="/account" style={{ color: "#fff", textDecoration: "none" }}>
+                Account
+              </Link>
             </nav>
+          </div>
 
+          <div style={{ flex: 1, maxWidth: 520 }}>
             <input
+              value=""
+              readOnly
               placeholder="Search (Directus placeholder)…"
               style={{
-                width: 380,
-                maxWidth: "42vw",
+                width: "100%",
                 padding: "10px 12px",
                 borderRadius: 999,
-                border: "1px solid #2a2a2a",
-                background: "#0e0e0e",
+                border: "1px solid #2f2f2f",
+                background: "#161616",
                 color: "#fff",
                 outline: "none",
               }}
-              onChange={() => {}}
             />
           </div>
 
-          {/* right: Clerk placeholder */}
-          <div style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)" }}>
-            <button
-              type="button"
-              onClick={() => alert("Clerk placeholder: wire later")}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "1px solid #2a2a2a",
-                background: "#ffffff",
-                color: "#111",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              Login
-            </button>
-          </div>
+          <button
+            onClick={() => navigate("/login")}
+            style={{
+              borderRadius: 999,
+              padding: "8px 14px",
+              border: "1px solid #2f2f2f",
+              background: "#fff",
+              color: "#111",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+            title="Login (Clerk placeholder)"
+          >
+            Login
+          </button>
+        </div>
 
-          <div style={{ marginTop: 10, textAlign: "center", fontSize: 12, opacity: 0.7 }}>
-            Search is a placeholder; Shop will later query Directus.
-          </div>
+        <div style={{ maxWidth: 1100, margin: "0 auto", padding: "6px 16px 10px", fontSize: 12, opacity: 0.7 }}>
+          Search is a placeholder; Shop will later query Directus. Login is a Clerk placeholder.
         </div>
       </header>
 
-      {/* 65/35 body */}
-      <div style={{ maxWidth: 1100, margin: "0 auto", padding: 18, paddingBottom: 140 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 18 }}>
-          {/* Left column */}
-          <div
-            style={{
-              border: "1px solid #222",
-              borderRadius: 18,
-              background: "linear-gradient(180deg, #161616, #101010)",
-              padding: 16,
-              display: "grid",
-              gridTemplateColumns: "280px 1fr",
-              gap: 16,
-              minHeight: 320,
-            }}
-          >
-            {/* cover */}
-            <div
-              style={{
-                borderRadius: 14,
-                border: "1px solid #2a2a2a",
-                background: "#0e0e0e",
-                display: "grid",
-                placeItems: "center",
-                overflow: "hidden",
-                height: 280,
-              }}
-            >
-              {coverSrc ? (
-                <img
-                  src={coverSrc}
-                  alt="cover"
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-              ) : (
-                <div style={{ fontSize: 12, opacity: 0.6 }}>No coverUrl found in manifest</div>
-              )}
-            </div>
-
-            {/* album meta */}
-            <div>
-              <div style={{ fontSize: 34, fontWeight: 800, lineHeight: 1.1 }}>Album</div>
-              <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
-                shareId: {parsed.shareId || shareId}
-              </div>
-              <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
-                Preview cap: {PREVIEW_SECONDS}s
-              </div>
-
-              <div style={{ marginTop: 18, fontSize: 12, opacity: 0.85 }}>Cover</div>
-
-              <div
-                style={{
-                  marginTop: 8,
-                  padding: 12,
-                  borderRadius: 12,
-                  border: "1px dashed #2f2f2f",
-                  background: "#0f0f0f",
-                  fontSize: 13,
-                }}
-              >
-                <div style={{ opacity: 0.85 }}>
-                  Reads coverUrl from manifest. Local preview upload below (does not persist).
-                </div>
-
-                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => onPickCover(e.target.files?.[0])}
-                    style={{ color: "#fff" }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setLocalCoverUrl("")}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: "1px solid #2a2a2a",
-                      background: "#141414",
-                      color: "#fff",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Right column */}
-          <div style={{ display: "grid", gap: 18, alignContent: "start" }}>
-            {/* now playing */}
-            <div
-              style={{
-                border: "1px solid #222",
-                borderRadius: 18,
-                background: "linear-gradient(180deg, #161616, #101010)",
-                padding: 16,
-              }}
-            >
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 800 }}>
-                {activeTrack?.title || "—"}
-              </div>
-              <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>
-                {fmtTime(curTime)} / {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))} · remaining {fmtTime(remaining)}
-              </div>
-            </div>
-
-            {/* tracks */}
-            <div
-              style={{
-                border: "1px solid #222",
-                borderRadius: 18,
-                background: "linear-gradient(180deg, #161616, #101010)",
-                padding: 16,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <div style={{ fontSize: 18, fontWeight: 800 }}>Tracks</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
-              </div>
-
-              <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-                {tracks.map((t, i) => {
-                  const isActive = i === activeIdx;
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => playIndex(i)}
-                      style={{
-                        textAlign: "left",
-                        padding: "12px 12px",
-                        borderRadius: 14,
-                        border: "1px solid #2a2a2a",
-                        background: isActive ? "#1f1f1f" : "#121212",
-                        cursor: "pointer",
-                        color: "#fff",
-                      }}
-                    >
-                      <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {t.title}
-                      </div>
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                        {t.durationSec ? fmtTime(t.durationSec) : ""}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* audio element (no native controls; no 3-dot menu) */}
-        <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
-      </div>
-
-      {/* bottom player */}
+      {/* PAGE WRAP (centered) */}
       <div
         style={{
-          position: "fixed",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          borderTop: "1px solid #2a2a2a",
-          background: "rgba(10,10,10,0.92)",
-          backdropFilter: "blur(8px)",
-          padding: "10px 12px",
+          minHeight: "100vh",
+          background: "#0b0b0b",
+          color: "#fff",
         }}
       >
-        <div style={{ maxWidth: 1100, margin: "0 auto", display: "grid", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
-              <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {activeTrack ? activeTrack.title : "—"}
+        <div style={{ maxWidth: 1100, margin: "0 auto", padding: 18, paddingBottom: 140 }}>
+          {/* 65/35 columns */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 65fr) minmax(0, 35fr)",
+              gap: 18,
+              alignItems: "start",
+            }}
+          >
+            {/* LEFT: Album card + cover */}
+            <div
+              style={{
+                borderRadius: 18,
+                border: "1px solid #1f1f1f",
+                background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
+                boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+                padding: 18,
+                display: "grid",
+                gridTemplateColumns: "320px minmax(0,1fr)",
+                gap: 18,
+              }}
+            >
+              <div
+                style={{
+                  borderRadius: 16,
+                  border: "1px solid #242424",
+                  background: "#0f0f0f",
+                  overflow: "hidden",
+                  minHeight: 220,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {coverUrl ? (
+                  <img
+                    src={coverUrl}
+                    alt="cover"
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    onError={() => {
+                      // if manifest cover is bad, fall back to none
+                      if (!coverOverrideUrl) return;
+                    }}
+                  />
+                ) : (
+                  <div style={{ fontSize: 12, opacity: 0.6, padding: 12 }}>No cover in manifest</div>
+                )}
               </div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Preview cap: {PREVIEW_SECONDS}s</div>
+
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1.05, marginBottom: 6 }}>
+                  {parsed.albumTitle || "Album"}
+                </div>
+
+                {/* Drop verbose manifest metadata per request; keep minimal */}
+                <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 14 }}>
+                  Preview cap: {PREVIEW_SECONDS}s
+                </div>
+
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Cover</div>
+                <div
+                  style={{
+                    borderRadius: 12,
+                    border: "1px dashed #2a2a2a",
+                    padding: 12,
+                    background: "#101010",
+                    display: "grid",
+                    gap: 10,
+                  }}
+                >
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                    Reads coverUrl from manifest. Local preview upload below (does not persist).
+                  </div>
+
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <input ref={coverFileRef} type="file" accept="image/*" onChange={onChooseCover} />
+                    <button
+                      onClick={resetCover}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid #2a2a2a",
+                        background: "#171717",
+                        color: "#fff",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                onClick={prev}
-                disabled={activeIdx <= 0}
-                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #2a2a2a", background: "#141414", color: "#fff" }}
+            {/* RIGHT COLUMN: top card + tracks card */}
+            <div style={{ display: "grid", gap: 18 }}>
+              {/* NEW top card (requested) */}
+              <div
+                style={{
+                  borderRadius: 18,
+                  border: "1px solid #1f1f1f",
+                  background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
+                  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+                  padding: 16,
+                }}
               >
-                Prev
-              </button>
-              <button
-                onClick={togglePlay}
-                disabled={!activeTrack?.playbackUrl}
-                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #2a2a2a", background: "#fff", color: "#111", fontWeight: 800 }}
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Now Playing</div>
+                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+                  {activeTrack?.title || "—"}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>
+                  {fmtTime(Math.min(curTime, PREVIEW_SECONDS))} / {fmtTime(PREVIEW_SECONDS)} · remaining{" "}
+                  {fmtTime(Math.max(0, PREVIEW_SECONDS - Math.min(curTime, PREVIEW_SECONDS)))}
+                </div>
+              </div>
+
+              {/* Tracks card */}
+              <div
+                style={{
+                  borderRadius: 18,
+                  border: "1px solid #1f1f1f",
+                  background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
+                  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+                  padding: 16,
+                }}
               >
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button
-                onClick={next}
-                disabled={activeIdx >= tracks.length - 1}
-                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #2a2a2a", background: "#141414", color: "#fff" }}
-              >
-                Next
-              </button>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 20, fontWeight: 800 }}>Tracks</div>
+                  <div style={{ fontSize: 12, opacity: 0.65 }}>{tracks.length}</div>
+                </div>
+
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  {tracks.map((t, i) => {
+                    const isActive = i === activeIdx;
+                    return (
+                      <button
+                        key={i}
+                        onClick={() => playIndex(i)}
+                        style={{
+                          textAlign: "left",
+                          padding: "12px 12px",
+                          borderRadius: 14,
+                          border: "1px solid #202020",
+                          background: isActive ? "#1a1a1a" : "#111",
+                          color: "#fff",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                        }}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {t.title}
+                        </span>
+                        <span style={{ fontSize: 12, opacity: 0.65 }}>
+                          {t.durationSec ? fmtTime(t.durationSec) : ""}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* move tracks "lower right bottom of second column": achieved by stacking top card then tracks */}
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 52, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
-              {fmtTime(curTime)}
+          {/* audio element (no native controls) */}
+          <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
+        </div>
+
+        {/* BOTTOM PLAYER (no 3-dot menu) */}
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            borderTop: "1px solid #1f1f1f",
+            background: "#0f0f0f",
+            padding: "12px 12px",
+          }}
+        >
+          <div style={{ maxWidth: 1100, margin: "0 auto", display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
+                <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {activeTrack?.title || "—"}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.65 }}>Preview cap: {PREVIEW_SECONDS}s</div>
+              </div>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  onClick={prev}
+                  disabled={activeIdx <= 0}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid #262626",
+                    background: "#141414",
+                    color: "#fff",
+                    cursor: activeIdx <= 0 ? "not-allowed" : "pointer",
+                    opacity: activeIdx <= 0 ? 0.5 : 1,
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={togglePlay}
+                  disabled={!activeTrack?.playbackUrl}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid #262626",
+                    background: "#fff",
+                    color: "#111",
+                    fontWeight: 800,
+                    cursor: !activeTrack?.playbackUrl ? "not-allowed" : "pointer",
+                    opacity: !activeTrack?.playbackUrl ? 0.6 : 1,
+                  }}
+                >
+                  {playing ? "Pause" : "Play"}
+                </button>
+                <button
+                  onClick={next}
+                  disabled={activeIdx >= tracks.length - 1}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    border: "1px solid #262626",
+                    background: "#141414",
+                    color: "#fff",
+                    cursor: activeIdx >= tracks.length - 1 ? "not-allowed" : "pointer",
+                    opacity: activeIdx >= tracks.length - 1 ? 0.5 : 1,
+                  }}
+                >
+                  Next
+                </button>
+              </div>
             </div>
-            <input
-              type="range"
-              min={0}
-              max={Math.min(dur || 0, PREVIEW_SECONDS)}
-              step="0.01"
-              value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
-              onChange={onSeek}
-              style={{ width: "100%" }}
-              disabled={!dur}
-            />
-            <div style={{ width: 52, fontSize: 12, opacity: 0.75 }}>
-              {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}
+
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 56, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
+                {fmtTime(Math.min(curTime, PREVIEW_SECONDS))}
+              </div>
+
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, maxSeek)}
+                step="0.01"
+                value={Math.min(curTime, maxSeek)}
+                onMouseDown={onSeekStart}
+                onTouchStart={onSeekStart}
+                onChange={onSeekMove}
+                onMouseUp={onSeekEnd}
+                onTouchEnd={onSeekEnd}
+                style={{ width: "100%" }}
+                disabled={!activeTrack?.playbackUrl}
+              />
+
+              <div style={{ width: 56, fontSize: 12, opacity: 0.75 }}>
+                {fmtTime(PREVIEW_SECONDS)}
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
