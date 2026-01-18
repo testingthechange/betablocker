@@ -499,7 +499,7 @@ export default function Product() {
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                   <div style={{ fontSize: 18, fontWeight: 800 }}>Tracks</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</}</div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
                 </div>
 
                 <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
