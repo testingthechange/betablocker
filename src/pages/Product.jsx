@@ -192,7 +192,6 @@ export default function Product() {
         })}
       </div>
 
-      {/* no controls => no 3-dot menu */}
       <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
 
       <div
