@@ -3,7 +3,6 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 export default function SiteShell({ children }) {
   const navigate = useNavigate();
   const [sp] = useSearchParams();
-
   const q = sp.get("q") || "";
 
   const onSubmit = (e) => {
@@ -14,7 +13,7 @@ export default function SiteShell({ children }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#07070a", color: "#fff" }}>
+    <div style={{ minHeight: "100vh", width: "100%", background: "#07070a", color: "#fff" }}>
       <header
         style={{
           position: "sticky",
@@ -59,7 +58,7 @@ export default function SiteShell({ children }) {
             </Link>
           </nav>
 
-          {/* Row 3: search centered (one line lower) */}
+          {/* Row 3: search centered (one line lower than login row) */}
           <form onSubmit={onSubmit} style={{ display: "flex", justifyContent: "center", marginTop: 10 }}>
             <input
               name="q"
@@ -74,6 +73,7 @@ export default function SiteShell({ children }) {
                 borderRadius: 999,
                 padding: "10px 14px",
                 color: "#fff",
+                outline: "none",
               }}
             />
           </form>

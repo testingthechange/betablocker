@@ -10,12 +10,11 @@ export default function Shop() {
   return (
     <SiteShell>
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "22px 16px 40px" }}>
-        {/* One thumbnail only */}
         <div style={{ display: "flex", justifyContent: "center" }}>
           <Link
             to={`/product/${DEMO_SHARE_ID}`}
             style={{
-              width: 320,
+              width: 340,
               textDecoration: "none",
               color: "inherit",
               borderRadius: 18,
@@ -39,7 +38,9 @@ export default function Shop() {
             </div>
             <div style={{ padding: 12, display: "grid", gap: 6 }}>
               <div style={{ fontWeight: 900, fontSize: 16, lineHeight: 1.2 }}>Demo Album</div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>{q ? `Search: "${q}"` : "Tap to open"}</div>
+              <div style={{ fontSize: 12, opacity: 0.75 }}>
+                {q ? `Search: "${q}"` : "Tap to open"}
+              </div>
             </div>
           </Link>
         </div>
