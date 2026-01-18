@@ -35,7 +35,7 @@ export default function Product() {
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  // HARD fallback: prevent any white/right gutter + body margins
+  // HARD fallback: ensure full-page background + no body margin
   useEffect(() => {
     const prevBg = document.body.style.background;
     const prevMargin = document.body.style.margin;
@@ -84,10 +84,10 @@ export default function Product() {
   const albumName = parsed?.meta?.albumTitle || parsed?.albumTitle || "Album";
   const performer = parsed?.meta?.artistName || "";
   const releaseDate = parsed?.meta?.releaseDate || "";
+
   const totalAlbumTimeSec = useMemo(() => {
-    // durationSec might be 0 today; this is where real values will land later
-    const sum = tracks.reduce((acc, t) => acc + (Number(t?.durationSec) || 0), 0);
-    return sum;
+    // durationSec may be 0 today; publish will fill later
+    return tracks.reduce((acc, t) => acc + (Number(t?.durationSec) || 0), 0);
   }, [tracks]);
 
   // keep audio src aligned
@@ -220,14 +220,7 @@ export default function Product() {
   if (!parsed) return <div style={{ color: "#fff", padding: 24 }}>Loading…</div>;
 
   return (
-    <div
-      style={{
-        width: "100vw",
-        minHeight: "100vh",
-        background: "#07070a",
-        color: "#fff",
-      }}
-    >
+    <div style={{ width: "100vw", minHeight: "100vh", background: "#07070a", color: "#fff" }}>
       {/* ONLY width controller */}
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
         {/* header */}
@@ -294,28 +287,18 @@ export default function Product() {
               >
                 Login
               </Link>
-              <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6, textAlign: "right" }}>
-                Login will be Clerk.
-              </div>
+              <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6, textAlign: "right" }}>Login will be Clerk.</div>
             </div>
           </div>
         </header>
 
-        <div style={{ padding: "18px 16px 120px" }}>
+        <div style={{ padding: "18px 16px 140px" }}>
           <div style={{ fontSize: 44, fontWeight: 900, margin: "10px 0 6px" }}>{albumName}</div>
           <div style={{ fontSize: 13, opacity: 0.7 }}>
             shareId: {parsed.shareId} · tracks: {tracks.length} · preview cap: {PREVIEW_SECONDS}s
           </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "65% 35%",
-              gap: 18,
-              marginTop: 18,
-              alignItems: "start",
-            }}
-          >
+          <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 18, marginTop: 18, alignItems: "start" }}>
             {/* left */}
             <div
               style={{
@@ -340,11 +323,7 @@ export default function Product() {
                 }}
               >
                 {coverUrl ? (
-                  <img
-                    src={coverUrl}
-                    alt="cover"
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  />
+                  <img src={coverUrl} alt="cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 ) : (
                   <div style={{ textAlign: "center", opacity: 0.8 }}>
                     <div style={{ fontWeight: 800, marginBottom: 6 }}>No cover in published manifest</div>
@@ -356,7 +335,7 @@ export default function Product() {
 
             {/* right */}
             <div style={{ display: "grid", gap: 14 }}>
-              {/* NEW card 0: album metadata placeholders */}
+              {/* album metadata placeholders */}
               <div
                 style={{
                   borderRadius: 18,
@@ -386,9 +365,7 @@ export default function Product() {
 
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div style={{ opacity: 0.75 }}>Total album time</div>
-                    <div style={{ fontWeight: 700, textAlign: "right" }}>
-                      {fmtHMS(totalAlbumTimeSec) || "—"}
-                    </div>
+                    <div style={{ fontWeight: 700, textAlign: "right" }}>{fmtHMS(totalAlbumTimeSec) || "—"}</div>
                   </div>
 
                   <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6 }}>
@@ -483,12 +460,8 @@ export default function Product() {
                           gap: 12,
                         }}
                       >
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {t.title}
-                        </span>
-                        <span style={{ fontSize: 12, opacity: 0.7 }}>
-                          {t.durationSec ? fmtTime(t.durationSec) : ""}
-                        </span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</span>
+                        <span style={{ fontSize: 12, opacity: 0.7 }}>{t.durationSec ? fmtTime(t.durationSec) : ""}</span>
                       </button>
                     );
                   })}
@@ -515,22 +488,66 @@ export default function Product() {
           padding: "10px 12px",
         }}
       >
-        <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gap: 8, color: "#fff" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
-              <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {activeTrack ? activeTrack.title : "—"}
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Preview cap: {PREVIEW_SECONDS}s max</div>
+        <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gap: 10, color: "#fff" }}>
+          {/* controls row: left play, center now playing, right prev/next */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "140px 1fr 160px",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            {/* left: play/pause icon circle */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                onClick={togglePlay}
+                disabled={!activeTrack?.playbackUrl}
+                aria-label={playing ? "Pause" : "Play"}
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  background: "rgba(255,255,255,0.10)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  fontSize: 18,
+                  display: "grid",
+                  placeItems: "center",
+                  opacity: !activeTrack?.playbackUrl ? 0.45 : 1,
+                }}
+              >
+                {playing ? "⏸" : "▶︎"}
+              </button>
             </div>
 
-            <div style={{ display: "flex", gap: 8 }}>
+            {/* center: now playing */}
+            <div style={{ textAlign: "center", minWidth: 0 }}>
+              <div style={{ fontSize: 12, opacity: 0.7, letterSpacing: 0.6 }}>NOW PLAYING</div>
+              <div
+                style={{
+                  fontWeight: 900,
+                  fontSize: 16,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {activeTrack ? activeTrack.title : "—"}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>Preview cap: {PREVIEW_SECONDS}s max</div>
+            </div>
+
+            {/* right: prev/next (as-is) */}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button
                 onClick={prev}
                 disabled={activeIdx <= 0}
                 style={{
-                  padding: "8px 10px",
+                  padding: "10px 12px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.12)",
                   background: "rgba(255,255,255,0.06)",
@@ -542,26 +559,10 @@ export default function Product() {
                 Prev
               </button>
               <button
-                onClick={togglePlay}
-                disabled={!activeTrack?.playbackUrl}
-                style={{
-                  padding: "8px 14px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: "#fff",
-                  color: "#111",
-                  cursor: "pointer",
-                  fontWeight: 800,
-                  opacity: !activeTrack?.playbackUrl ? 0.45 : 1,
-                }}
-              >
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button
                 onClick={next}
                 disabled={activeIdx >= tracks.length - 1}
                 style={{
-                  padding: "8px 10px",
+                  padding: "10px 12px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,255,255,0.12)",
                   background: "rgba(255,255,255,0.06)",
@@ -575,22 +576,26 @@ export default function Product() {
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 48, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
-              {fmtTime(curTime)}
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={Math.min(dur || 0, PREVIEW_SECONDS)}
-              step="0.01"
-              value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
-              onChange={onSeek}
-              style={{ width: "100%" }}
-              disabled={!dur}
-            />
-            <div style={{ width: 48, fontSize: 12, opacity: 0.75 }}>
-              {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}
+          {/* time bar row centered */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+            }}
+          >
+            <div style={{ width: "min(720px, 92vw)", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 48, textAlign: "right", fontSize: 12, opacity: 0.75 }}>{fmtTime(curTime)}</div>
+              <input
+                type="range"
+                min={0}
+                max={Math.min(dur || 0, PREVIEW_SECONDS)}
+                step="0.01"
+                value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
+                onChange={onSeek}
+                style={{ width: "100%" }}
+                disabled={!dur}
+              />
+              <div style={{ width: 48, fontSize: 12, opacity: 0.75 }}>{fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}</div>
             </div>
           </div>
         </div>
