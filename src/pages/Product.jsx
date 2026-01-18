@@ -1,12 +1,12 @@
-// src/pages/Product.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
 const PREVIEW_SECONDS = 40;
 
-// TEMP PROOF: remove later if you want
-const BUILD_MARKER = "PRODUCT_RECEIVER_2COL_V1";
+function safeString(v) {
+  return String(v ?? "").trim();
+}
 
 function fmtTime(sec) {
   const n = Number(sec);
@@ -16,23 +16,61 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function IconPlay({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M8 5v14l12-7L8 5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function IconPause({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M7 5h4v14H7V5zm6 0h4v14h-4V5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function IconPrev({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M6 6h2v12H6V6zm3 6l9-6v12l-9-6z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function IconNext({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M16 6h2v12h-2V6zM6 18V6l9 6-9 6z" fill="currentColor" />
+    </svg>
+  );
+}
+
 export default function Product() {
   const { shareId } = useParams();
 
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState(null);
 
-  // player state (LOCKED behavior)
+  // player state
   const audioRef = useRef(null);
   const [activeIdx, setActiveIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
 
+  // local-only cover override (does not persist)
+  const [localCoverUrl, setLocalCoverUrl] = useState("");
+
+  // load manifest
   useEffect(() => {
     let cancelled = false;
-    setParsed(null);
+
     setErr(null);
+    setParsed(null);
+    setLocalCoverUrl("");
 
     fetchManifest(shareId)
       .then((m) => {
@@ -57,7 +95,10 @@ export default function Product() {
   const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
   const activeTrack = tracks[activeIdx] || null;
 
-  // Keep audio src aligned with active track
+  const manifestCoverUrl = safeString(parsed?.coverUrl);
+  const coverUrl = localCoverUrl || manifestCoverUrl;
+
+  // set audio src when active track changes
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -65,25 +106,79 @@ export default function Product() {
     setCurTime(0);
     setDur(0);
 
-    const url = activeTrack?.playbackUrl;
+    const url = safeString(activeTrack?.playbackUrl);
+    try {
+      a.pause();
+      a.currentTime = 0;
+    } catch {}
+
     if (!url) {
-      try {
-        a.pause();
-      } catch {}
       setPlaying(false);
       return;
     }
 
     try {
-      a.pause();
-      a.currentTime = 0;
       a.src = url;
       a.load();
     } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTrack?.playbackUrl]);
 
-  // Wire audio events + enforce preview cap + autoplay next track
+  const playFromIndex = (i) => {
+    if (!tracks[i]?.playbackUrl) return;
+    setActiveIdx(i);
+    setTimeout(() => {
+      const a = audioRef.current;
+      if (!a) return;
+      a.play().catch(() => {});
+    }, 0);
+  };
+
+  const nextIndex = () => Math.min(tracks.length - 1, activeIdx + 1);
+  const prevIndex = () => Math.max(0, activeIdx - 1);
+
+  const goNext = (autoplay = false) => {
+    const ni = nextIndex();
+    if (ni === activeIdx) {
+      // end of playlist
+      const a = audioRef.current;
+      if (a) {
+        try {
+          a.pause();
+          a.currentTime = 0;
+        } catch {}
+      }
+      setPlaying(false);
+      setCurTime(0);
+      return;
+    }
+    setActiveIdx(ni);
+    if (autoplay) {
+      setTimeout(() => {
+        const a = audioRef.current;
+        if (a) a.play().catch(() => {});
+      }, 0);
+    }
+  };
+
+  const goPrev = (autoplay = false) => {
+    const pi = prevIndex();
+    setActiveIdx(pi);
+    if (autoplay) {
+      setTimeout(() => {
+        const a = audioRef.current;
+        if (a) a.play().catch(() => {});
+      }, 0);
+    }
+  };
+
+  const togglePlay = () => {
+    const a = audioRef.current;
+    if (!a || !activeTrack?.playbackUrl) return;
+    if (a.paused) a.play().catch(() => {});
+    else a.pause();
+  };
+
+  // wire audio events + enforce preview cap + continuous play
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -94,84 +189,51 @@ export default function Product() {
       const t = a.currentTime || 0;
       setCurTime(t);
 
-      // preview cap: hard stop at 40s
+      // PREVIEW CAP (locked)
       if (t >= PREVIEW_SECONDS) {
         try {
           a.pause();
           a.currentTime = 0;
         } catch {}
+        setCurTime(0);
         setPlaying(false);
 
-        // autoplay next track (continuous)
-        setActiveIdx((i) => {
-          const next = Math.min(tracks.length - 1, i + 1);
-          if (next !== i) {
-            setTimeout(() => {
-              const aa = audioRef.current;
-              if (!aa) return;
-              aa.play().catch(() => {});
-            }, 0);
-          }
-          return next;
-        });
+        // CONTINUOUS PLAY: advance to next and autoplay
+        goNext(true);
       }
     };
 
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
 
+    const onEnded = () => {
+      setPlaying(false);
+      setCurTime(0);
+      // natural end -> next and autoplay
+      goNext(true);
+    };
+
     a.addEventListener("loadedmetadata", onMeta);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
+    a.addEventListener("ended", onEnded);
 
     return () => {
       a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
+      a.removeEventListener("ended", onEnded);
     };
-  }, [tracks.length]);
-
-  const playIndex = (i) => {
-    if (!tracks[i]?.playbackUrl) return;
-    setActiveIdx(i);
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (!a) return;
-      a.play().catch(() => {});
-    }, 0);
-  };
-
-  const togglePlay = () => {
-    const a = audioRef.current;
-    if (!a || !activeTrack?.playbackUrl) return;
-    if (a.paused) a.play().catch(() => {});
-    else a.pause();
-  };
-
-  const prev = () => {
-    setActiveIdx((i) => Math.max(0, i - 1));
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (a && playing) a.play().catch(() => {});
-    }, 0);
-  };
-
-  const next = () => {
-    setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (a && playing) a.play().catch(() => {});
-    }, 0);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIdx, tracks.length]);
 
   const onSeek = (e) => {
     const a = audioRef.current;
     if (!a) return;
     const v = Number(e.target.value);
     if (!Number.isFinite(v)) return;
-
     const clamped = Math.min(v, PREVIEW_SECONDS);
     try {
       a.currentTime = clamped;
@@ -179,375 +241,364 @@ export default function Product() {
     } catch {}
   };
 
-  if (err) {
-    return (
-      <div style={{ minHeight: "100vh", background: "#07060b", color: "#fff", padding: 24 }}>
-        <pre style={{ whiteSpace: "pre-wrap" }}>{err}</pre>
-      </div>
-    );
-  }
+  const onCoverPick = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const url = URL.createObjectURL(f);
+      setLocalCoverUrl(url);
+    } catch {}
+  };
 
-  // Root full-viewport background + centered container (ONLY width control)
+  const resetLocalCover = () => {
+    try {
+      if (localCoverUrl) URL.revokeObjectURL(localCoverUrl);
+    } catch {}
+    setLocalCoverUrl("");
+  };
+
+  if (err) return <pre style={{ color: "#fff", padding: 18 }}>{err}</pre>;
+  if (!parsed) return <div style={{ color: "#fff", padding: 18 }}>Loading…</div>;
+
   return (
     <div
       style={{
         minHeight: "100vh",
-        width: "100vw",
+        width: "100%",
         background:
-          "radial-gradient(1000px 500px at 50% -10%, rgba(140,80,255,0.18), rgba(0,0,0,0) 60%), #07060b",
-        color: "#fff",
+          "radial-gradient(1200px 700px at 30% 0%, rgba(120,60,220,0.22), transparent 60%), #07060b",
+        color: "rgba(255,255,255,0.92)",
+        paddingBottom: 96, // room for player
       }}
     >
-      {/* GLOBAL HEADER (single) */}
-      <header
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 50,
-          background: "rgba(5,4,8,0.92)",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-          backdropFilter: "blur(10px)",
-        }}
-      >
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "14px 18px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center" }}>
-            <div style={{ fontWeight: 800, letterSpacing: 0.2 }}>Block Radius</div>
-
-            <nav style={{ display: "flex", gap: 18, justifyContent: "center" }}>
-              <Link to="/" style={{ color: "#fff", textDecoration: "none", opacity: 0.9 }}>
-                Home
-              </Link>
-              <Link to="/shop" style={{ color: "#fff", textDecoration: "none", opacity: 0.9 }}>
-                Shop
-              </Link>
-              <Link to="/account" style={{ color: "#fff", textDecoration: "none", opacity: 0.9 }}>
-                Account
-              </Link>
-            </nav>
-
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <Link
-                to="/login"
-                style={{
-                  color: "#111",
-                  background: "#f2f2f2",
-                  textDecoration: "none",
-                  padding: "8px 14px",
-                  borderRadius: 999,
-                  fontWeight: 700,
-                }}
-              >
-                Login
-              </Link>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 10, display: "flex", justifyContent: "center" }}>
-            <input
-              placeholder="Search (Directus placeholder)..."
-              style={{
-                width: "min(820px, 100%)",
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.06)",
-                color: "#fff",
-                outline: "none",
-              }}
-            />
-          </div>
-
-          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7, textAlign: "center" }}>
-            Search is a placeholder; Shop will later query Directus. Login will be Clerk.
-          </div>
+      {/* SINGLE WIDTH CONTROLLER */}
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "22px 18px 0" }}>
+        <div style={{ fontSize: 44, fontWeight: 800, margin: "6px 0 18px" }}>
+          {safeString(parsed?.albumTitle) || "Album"}
         </div>
-      </header>
 
-      {/* BODY */}
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "22px 18px 120px" }}>
-        {/* PROOF */}
-        <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 10 }}>{BUILD_MARKER}</div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 60%) minmax(0, 40%)",
+            gap: 16,
+            alignItems: "start",
+          }}
+        >
+          {/* LEFT COLUMN */}
+          <div
+            style={{
+              borderRadius: 18,
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, fontSize: 12, opacity: 0.7 }}>Album Cover</div>
 
-        {!parsed ? (
-          <div style={{ opacity: 0.9 }}>Loading…</div>
-        ) : (
-          <>
-            <h1 style={{ margin: "10px 0 18px", fontSize: 44, letterSpacing: -0.8 }}>Album</h1>
+            <div
+              style={{
+                aspectRatio: "1 / 1",
+                background: "rgba(255,255,255,0.06)",
+                display: "grid",
+                placeItems: "center",
+                borderTop: "1px solid rgba(255,255,255,0.10)",
+                borderBottom: "1px solid rgba(255,255,255,0.10)",
+              }}
+            >
+              {coverUrl ? (
+                <img
+                  src={coverUrl}
+                  alt="Album cover"
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                />
+              ) : (
+                <div style={{ opacity: 0.75, fontWeight: 700 }}>No coverUrl in manifest</div>
+              )}
+            </div>
 
-            {/* TWO COLUMN LAYOUT (RESTORED) */}
-            <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 16, alignItems: "start" }}>
-              {/* LEFT COLUMN */}
+            <div style={{ padding: 14 }}>
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Cover</div>
               <div
                 style={{
-                  borderRadius: 18,
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  background: "rgba(255,255,255,0.04)",
-                  boxShadow: "0 10px 40px rgba(0,0,0,0.35)",
-                  overflow: "hidden",
+                  padding: 12,
+                  borderRadius: 14,
+                  border: "1px dashed rgba(255,255,255,0.18)",
+                  background: "rgba(0,0,0,0.15)",
                 }}
               >
-                <div style={{ padding: 14, fontSize: 12, opacity: 0.75 }}>Album Cover</div>
-
-                <div
-                  style={{
-                    height: 320,
-                    display: "grid",
-                    placeItems: "center",
-                    background: "rgba(0,0,0,0.25)",
-                    borderTop: "1px solid rgba(255,255,255,0.06)",
-                    borderBottom: "1px solid rgba(255,255,255,0.06)",
-                  }}
-                >
-                  <div style={{ opacity: 0.8, fontWeight: 700 }}>No coverUrl in manifest</div>
+                <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 8 }}>
+                  Reads coverUrl from manifest. Local preview upload below (does not persist).
                 </div>
-
-                <div style={{ padding: 16 }}>
-                  {/* keep album title only; remove debug/shareId text */}
-                  <div style={{ fontSize: 12, opacity: 0.65 }}>Album</div>
-                  <div style={{ fontSize: 34, fontWeight: 900, letterSpacing: -0.6 }}>
-                    {parsed.albumTitle || "Album"}
-                  </div>
-                </div>
-              </div>
-
-              {/* RIGHT COLUMN */}
-              <div style={{ display: "grid", gap: 12 }}>
-                {/* Album meta card (placeholders) */}
-                <div
-                  style={{
-                    borderRadius: 18,
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    background: "rgba(255,255,255,0.04)",
-                    boxShadow: "0 10px 40px rgba(0,0,0,0.35)",
-                    padding: 14,
-                  }}
-                >
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Album Info</div>
-
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ opacity: 0.8 }}>Name</div>
-                      <div style={{ fontWeight: 800 }}>{parsed.albumTitle || "Album"}</div>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ opacity: 0.8 }}>Performer</div>
-                      <div style={{ fontWeight: 700, opacity: 0.8 }}>—</div>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ opacity: 0.8 }}>Release Date</div>
-                      <div style={{ fontWeight: 700, opacity: 0.8 }}>—</div>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div style={{ opacity: 0.8 }}>Total Time</div>
-                      <div style={{ fontWeight: 700, opacity: 0.8 }}>—</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Purchase card */}
-                <div
-                  style={{
-                    borderRadius: 18,
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    background: "rgba(255,255,255,0.04)",
-                    boxShadow: "0 10px 40px rgba(0,0,0,0.35)",
-                    padding: 14,
-                  }}
-                >
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Purchase</div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <input type="file" accept="image/*" onChange={onCoverPick} />
                   <button
+                    onClick={resetLocalCover}
                     style={{
-                      width: "100%",
-                      borderRadius: 999,
-                      border: "1px solid rgba(56,255,160,0.35)",
-                      background: "rgba(20,80,40,0.25)",
-                      color: "#37ff9b",
-                      fontSize: 18,
-                      fontWeight: 900,
-                      padding: "12px 14px",
+                      padding: "8px 10px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.14)",
+                      background: "rgba(255,255,255,0.06)",
+                      color: "#fff",
                       cursor: "pointer",
                     }}
-                    onClick={() => {}}
                   >
-                    Buy $19.50
+                    Reset
                   </button>
-                </div>
-
-                {/* Marketing card */}
-                <div
-                  style={{
-                    borderRadius: 18,
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    background: "rgba(255,255,255,0.04)",
-                    boxShadow: "0 10px 40px rgba(0,0,0,0.35)",
-                    padding: 14,
-                  }}
-                >
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Included</div>
-                  <div style={{ display: "grid", gap: 8, opacity: 0.9 }}>
-                    <div>• 8 songs</div>
-                    <div>• Smart Bridge mode</div>
-                    <div>• Album mode</div>
-                    <div>• Artist control</div>
-                    <div>• Over 60 minutes of bonus authored bridge content</div>
-                    <div>• FREE MP3 album mix download included</div>
-                  </div>
-                </div>
-
-                {/* Tracks card */}
-                <div
-                  style={{
-                    borderRadius: 18,
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    background: "rgba(255,255,255,0.04)",
-                    boxShadow: "0 10px 40px rgba(0,0,0,0.35)",
-                    padding: 14,
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                    <div style={{ fontSize: 18, fontWeight: 900 }}>Tracks</div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                    {tracks.map((t, i) => {
-                      const isActive = i === activeIdx;
-                      return (
-                        <button
-                          key={i}
-                          onClick={() => playIndex(i)}
-                          style={{
-                            textAlign: "left",
-                            padding: "12px 12px",
-                            borderRadius: 12,
-                            border: "1px solid rgba(255,255,255,0.10)",
-                            background: isActive ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.06)",
-                            cursor: "pointer",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 12,
-                            color: "#fff",
-                          }}
-                        >
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {t.title}
-                          </span>
-                          <span style={{ fontSize: 12, opacity: 0.7 }}>
-                            {t.durationSec ? fmtTime(t.durationSec) : ""}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
               </div>
             </div>
+          </div>
 
-            {/* Hidden audio element (no native controls / no 3-dot) */}
-            <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
-          </>
-        )}
+          {/* RIGHT COLUMN */}
+          <div style={{ display: "grid", gap: 14 }}>
+            {/* Album Info card */}
+            <div
+              style={{
+                borderRadius: 18,
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                padding: 14,
+              }}
+            >
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Album Info</div>
+
+              <div style={{ display: "grid", gap: 8 }}>
+                <Row label="Name" value={safeString(parsed?.meta?.albumTitle || parsed?.albumTitle || "Album")} />
+                <Row label="Performer" value={safeString(parsed?.meta?.artistName || "—")} />
+                <Row label="Release Date" value={safeString(parsed?.meta?.releaseDate || "—")} />
+                <Row label="Total Time" value={"—"} />
+              </div>
+            </div>
+
+            {/* Purchase card */}
+            <div
+              style={{
+                borderRadius: 18,
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                padding: 14,
+              }}
+            >
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Purchase</div>
+              <button
+                type="button"
+                style={{
+                  width: "100%",
+                  padding: "14px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(46, 204, 113, 0.35)",
+                  background: "rgba(46, 204, 113, 0.16)",
+                  color: "rgba(120,255,180,0.95)",
+                  fontWeight: 800,
+                  fontSize: 18,
+                  cursor: "pointer",
+                }}
+                onClick={() => {}}
+              >
+                Buy $19.50
+              </button>
+            </div>
+
+            {/* Marketing card */}
+            <div
+              style={{
+                borderRadius: 18,
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                padding: 14,
+              }}
+            >
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>Included</div>
+              <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.55, opacity: 0.92 }}>
+                <li>8 songs</li>
+                <li>Smart Bridge mode</li>
+                <li>Album mode</li>
+                <li>Artist control</li>
+                <li>Over 60 minutes of bonus authored bridge content</li>
+                <li>FREE MP3 album mix download included</li>
+              </ul>
+            </div>
+
+            {/* Tracks card */}
+            <div
+              style={{
+                borderRadius: 18,
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                padding: 14,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <div style={{ fontSize: 18, fontWeight: 800 }}>Tracks</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                {tracks.map((t, i) => {
+                  const isActive = i === activeIdx;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => playFromIndex(i)}
+                      style={{
+                        textAlign: "left",
+                        padding: "12px 12px",
+                        borderRadius: 12,
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: isActive ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+                        color: "#fff",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {safeString(t?.title) || `Track ${i + 1}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* BOTTOM PLAYER (KEEP DESIGN) */}
+      {/* NO native controls (no 3-dot menu) */}
+      <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
+
+      {/* BOTTOM PLAYER (layout stays) */}
       <div
         style={{
           position: "fixed",
           left: 0,
           right: 0,
           bottom: 0,
-          background: "rgba(20,20,22,0.92)",
+          height: 86,
+          background: "rgba(18,18,20,0.92)",
           borderTop: "1px solid rgba(255,255,255,0.10)",
           backdropFilter: "blur(10px)",
         }}
       >
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "12px 18px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "180px 1fr 180px", alignItems: "center", gap: 10 }}>
-            {/* LEFT: play/pause */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <button
-                onClick={togglePlay}
-                disabled={!activeTrack?.playbackUrl}
-                style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.18)",
-                  background: "rgba(255,255,255,0.10)",
-                  color: "#fff",
-                  fontSize: 18,
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-                aria-label={playing ? "Pause" : "Play"}
-                title={playing ? "Pause" : "Play"}
-              >
-                {playing ? "❚❚" : "▶"}
-              </button>
+        <div
+          style={{
+            maxWidth: 1200,
+            margin: "0 auto",
+            height: "100%",
+            padding: "10px 18px",
+            display: "grid",
+            gridTemplateColumns: "220px 1fr 220px",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          {/* LEFT: Play/Pause */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button
+              onClick={togglePlay}
+              disabled={!activeTrack?.playbackUrl}
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 999,
+                display: "grid",
+                placeItems: "center",
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(255,255,255,0.08)",
+                color: "#fff",
+                cursor: activeTrack?.playbackUrl ? "pointer" : "not-allowed",
+              }}
+              aria-label={playing ? "Pause" : "Play"}
+            >
+              {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
+            </button>
+          </div>
+
+          {/* CENTER: Now playing + seek */}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ textAlign: "center", fontSize: 11, letterSpacing: 1.4, opacity: 0.65 }}>
+              NOW PLAYING
+            </div>
+            <div
+              style={{
+                textAlign: "center",
+                fontWeight: 700,
+                fontSize: 16,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                marginTop: 2,
+              }}
+            >
+              {activeTrack ? safeString(activeTrack.title) : "—"}
             </div>
 
-            {/* CENTER: now playing + timeline */}
-            <div style={{ display: "grid", justifyItems: "center", gap: 6 }}>
-              <div style={{ fontSize: 11, letterSpacing: 1.4, opacity: 0.65 }}>NOW PLAYING</div>
-              <div style={{ fontSize: 16, fontWeight: 900 }}>
-                {activeTrack ? activeTrack.title : "—"}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+              <div style={{ width: 44, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
+                {fmtTime(curTime)}
               </div>
-
-              <div style={{ width: "min(760px, 100%)", display: "grid", gridTemplateColumns: "48px 1fr 48px", alignItems: "center", gap: 10 }}>
-                <div style={{ textAlign: "right", fontSize: 12, opacity: 0.75 }}>{fmtTime(curTime)}</div>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.min(dur || 0, PREVIEW_SECONDS)}
-                  step="0.01"
-                  value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
-                  onChange={onSeek}
-                  style={{ width: "100%" }}
-                  disabled={!dur}
-                />
-                <div style={{ fontSize: 12, opacity: 0.75 }}>{fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}</div>
+              <input
+                type="range"
+                min={0}
+                max={Math.min(dur || 0, PREVIEW_SECONDS)}
+                step="0.01"
+                value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
+                onChange={onSeek}
+                style={{ width: "100%" }}
+                disabled={!dur}
+              />
+              <div style={{ width: 44, fontSize: 12, opacity: 0.75 }}>
+                {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}
               </div>
-
-              <div style={{ fontSize: 12, opacity: 0.65 }}>Preview: {PREVIEW_SECONDS}s max</div>
             </div>
+          </div>
 
-            {/* RIGHT: prev/next */}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-              <button
-                onClick={prev}
-                disabled={activeIdx <= 0}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "#fff",
-                  cursor: "pointer",
-                  opacity: activeIdx <= 0 ? 0.4 : 1,
-                }}
-              >
-                Prev
-              </button>
-              <button
-                onClick={next}
-                disabled={activeIdx >= tracks.length - 1}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "#fff",
-                  cursor: "pointer",
-                  opacity: activeIdx >= tracks.length - 1 ? 0.4 : 1,
-                }}
-              >
-                Next
-              </button>
-            </div>
+          {/* RIGHT: Prev/Next */}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button
+              onClick={() => goPrev(true)}
+              disabled={activeIdx <= 0}
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
+                opacity: activeIdx <= 0 ? 0.35 : 1,
+                cursor: activeIdx <= 0 ? "not-allowed" : "pointer",
+              }}
+              aria-label="Previous"
+            >
+              <IconPrev size={18} />
+            </button>
+
+            <button
+              onClick={() => goNext(true)}
+              disabled={activeIdx >= tracks.length - 1}
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.06)",
+                color: "#fff",
+                opacity: activeIdx >= tracks.length - 1 ? 0.35 : 1,
+                cursor: activeIdx >= tracks.length - 1 ? "not-allowed" : "pointer",
+              }}
+              aria-label="Next"
+            >
+              <IconNext size={18} />
+            </button>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 14 }}>
+      <div style={{ opacity: 0.75 }}>{label}</div>
+      <div style={{ fontWeight: 700 }}>{value}</div>
     </div>
   );
 }
