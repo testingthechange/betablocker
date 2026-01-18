@@ -1,141 +1,109 @@
-import { Link, useLocation } from "react-router-dom";
+// src/layouts/AppLayout.jsx
+import { Link, Outlet, useLocation } from "react-router-dom";
 
-export default function AppLayout({ children }) {
+const BG = "radial-gradient(900px 500px at 40% 10%, rgba(140,70,255,0.18), transparent 60%), radial-gradient(800px 520px at 70% 30%, rgba(90,40,210,0.16), transparent 60%), #05040a";
+
+function NavLink({ to, children }) {
   const loc = useLocation();
-
-  const isActive = (path) => (loc.pathname === path ? 1 : 0);
-
-  const shell = {
-    minHeight: "100vh",
-    width: "100%",
-    background: "transparent",
-  };
-
-  const container = {
-    width: "100%",
-    maxWidth: 1200,
-    margin: "0 auto",
-    padding: "16px 18px",
-  };
-
-  const headerWrap = {
-    position: "sticky",
-    top: 0,
-    zIndex: 100,
-    backdropFilter: "blur(10px)",
-    background: "linear-gradient(to bottom, rgba(0,0,0,0.55), rgba(0,0,0,0.25))",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
-  };
-
-  const rowTop = {
-    display: "grid",
-    gridTemplateColumns: "1fr auto 1fr",
-    alignItems: "center",
-    gap: 12,
-    paddingBottom: 10,
-  };
-
-  const brand = {
-    fontWeight: 800,
-    letterSpacing: 0.2,
-  };
-
-  const nav = {
-    display: "flex",
-    gap: 18,
-    justifyContent: "center",
-    fontWeight: 600,
-    opacity: 0.9,
-  };
-
-  const navLink = (active) => ({
-    textDecoration: "none",
-    padding: "6px 10px",
-    borderRadius: 999,
-    background: active ? "rgba(255,255,255,0.08)" : "transparent",
-    border: active ? "1px solid rgba(255,255,255,0.10)" : "1px solid transparent",
-  });
-
-  const loginWrap = {
-    display: "flex",
-    justifyContent: "flex-end",
-  };
-
-  const loginBtn = {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "9px 14px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.92)",
-    color: "#111",
-    fontWeight: 700,
-    textDecoration: "none",
-  };
-
-  const rowSearch = {
-    display: "flex",
-    justifyContent: "center",
-    paddingBottom: 14,
-  };
-
-  const search = {
-    width: "min(720px, 100%)",
-    padding: "12px 14px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
-    color: "rgba(255,255,255,0.92)",
-    outline: "none",
-  };
-
-  const helper = {
-    marginTop: 8,
-    fontSize: 12,
-    opacity: 0.6,
-    textAlign: "center",
-    paddingBottom: 10,
-    borderBottom: "1px solid rgba(255,255,255,0.06)",
-  };
-
+  const active = loc.pathname === to || (to !== "/" && loc.pathname.startsWith(to));
   return (
-    <div style={shell}>
-      <header style={headerWrap}>
-        <div style={container}>
-          <div style={rowTop}>
-            <div style={brand}>Block Radius</div>
+    <Link
+      to={to}
+      style={{
+        textDecoration: "none",
+        color: active ? "#ffffff" : "rgba(255,255,255,0.82)",
+        fontWeight: 650,
+        padding: "6px 10px",
+        borderRadius: 999,
+        background: active ? "rgba(255,255,255,0.10)" : "transparent",
+        border: active ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
+      }}
+    >
+      {children}
+    </Link>
+  );
+}
 
-            <nav style={nav}>
-              <Link to="/" style={navLink(isActive("/"))}>Home</Link>
-              <Link to="/shop" style={navLink(isActive("/shop"))}>Shop</Link>
-              <Link to="/account" style={navLink(isActive("/account"))}>Account</Link>
-            </nav>
+export default function AppLayout() {
+  return (
+    <div style={{ minHeight: "100vh", width: "100%", background: BG, color: "#fff" }}>
+      {/* SINGLE global header (ONLY place it exists) */}
+      <header
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 100,
+          backdropFilter: "blur(10px)",
+          background: "rgba(0,0,0,0.35)",
+          borderBottom: "1px solid rgba(255,255,255,0.10)",
+        }}
+      >
+        {/* full-width row */}
+        <div style={{ width: "100%" }}>
+          {/* centered container */}
+          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "12px 16px" }}>
+            {/* top line: brand / nav / login */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto 1fr",
+                alignItems: "center",
+                gap: 12,
+              }}
+            >
+              <div style={{ fontWeight: 900, letterSpacing: -0.2 }}>Block Radius</div>
 
-            <div style={loginWrap}>
-              {/* Placeholder for Clerk */}
-              <Link to="/login" style={loginBtn} title="Login (Clerk placeholder)">
-                Login
-              </Link>
+              <nav style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                <NavLink to="/">Home</NavLink>
+                <NavLink to="/shop">Shop</NavLink>
+                <NavLink to="/account">Account</NavLink>
+              </nav>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <Link
+                  to="/login"
+                  style={{
+                    textDecoration: "none",
+                    color: "#111",
+                    background: "#fff",
+                    borderRadius: 999,
+                    padding: "8px 14px",
+                    fontWeight: 800,
+                    border: "1px solid rgba(255,255,255,0.20)",
+                  }}
+                >
+                  Login
+                </Link>
+              </div>
             </div>
-          </div>
 
-          <div style={rowSearch}>
-            <input
-              style={search}
-              placeholder="Search (Directus placeholder)…"
-              disabled
-            />
-          </div>
+            {/* second line: search */}
+            <div style={{ marginTop: 10, display: "flex", justifyContent: "center" }}>
+              <input
+                placeholder="Search (Directus placeholder)…"
+                style={{
+                  width: "min(760px, 100%)",
+                  padding: "12px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.14)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  outline: "none",
+                }}
+              />
+            </div>
 
-          <div style={helper}>
-            Search is a placeholder; Shop will later query Directus. Login will be Clerk.
+            <div style={{ marginTop: 8, textAlign: "center", fontSize: 12, opacity: 0.7 }}>
+              Search is a placeholder; Shop will later query Directus. Login will be Clerk.
+            </div>
           </div>
         </div>
       </header>
 
-      {/* ONLY centered page body container */}
-      <main style={container}>{children}</main>
+      {/* page container (ONLY place max-width is applied) */}
+      <main style={{ maxWidth: 1100, margin: "0 auto", padding: "18px 16px 120px" }}>
+        <Outlet />
+      </main>
     </div>
   );
 }
