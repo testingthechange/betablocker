@@ -1,129 +1,97 @@
-// src/pages/Shop.jsx
-import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
-const DEMO_SHARE_ID = "share_2026-01-16T21-20-04-257Z_26d5b8";
-
-function Card({ title, right, children }) {
-  return (
-    <div
-      style={{
-        borderRadius: 18,
-        border: "1px solid rgba(255,255,255,0.10)",
-        background: "rgba(255,255,255,0.06)",
-        boxShadow: "0 18px 55px rgba(0,0,0,0.35) inset, 0 10px 40px rgba(0,0,0,0.20)",
-        overflow: "hidden",
-      }}
-    >
-      {(title || right) && (
-        <div
-          style={{
-            padding: "12px 14px",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            borderBottom: "1px solid rgba(255,255,255,0.08)",
-          }}
-        >
-          <div style={{ fontSize: 16, fontWeight: 900 }}>{title}</div>
-          {right ? <div style={{ fontSize: 12, opacity: 0.75 }}>{right}</div> : null}
-        </div>
-      )}
-      <div style={{ padding: 14 }}>{children}</div>
-    </div>
-  );
-}
+const PRODUCT_LINK =
+  "/product/share_2026-01-16T21-20-04-257Z_26d5b8";
 
 export default function Shop() {
-  const nav = useNavigate();
-
-  const fakeThumbs = useMemo(
-    () => Array.from({ length: 8 }).map((_, i) => ({ id: `fake-${i}`, label: `Release ${i + 1}` })),
-    []
-  );
-
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <div>
-        <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: -0.3 }}>Shop</div>
-        <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6 }}>Marketing + search landing (Directus later).</div>
-      </div>
+    <div>
+      <div
+        style={{
+          maxWidth: 1200,
+          margin: "0 auto",
+          padding: "40px 24px 80px",
+        }}
+      >
+        <h1 style={{ fontSize: 32, marginBottom: 20 }}>
+          Shop music authored for the fan!!!!
+        </h1>
 
-      {/* New Releases row (cosmetic) */}
-      <Card title="New Releases" right={String(fakeThumbs.length)}>
+        {/* NEW RELEASES */}
+        <div style={{ marginBottom: 40 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 14 }}>
+            New Releases
+          </div>
+
+          <div style={{ display: "flex", gap: 12 }}>
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div
+                key={i}
+                style={{
+                  width: 100,
+                  height: 100,
+                  borderRadius: 10,
+                  background: "#222",
+                  opacity: 0.5,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* TWO COLUMNS */}
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
-            gap: 10,
+            gridTemplateColumns: "60% 40%",
+            gap: 32,
           }}
         >
-          {fakeThumbs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => {}}
+          {/* LEFT IMAGE */}
+          <div>
+            <img
+              src="/the-vibrant-atmosphere-of-a-music-festival-with-a-crowd-of-enthusiastic-fans-cheering-for-their-favorite-band-generative-ai-photo.jpg"
+              alt="Music crowd"
               style={{
-                height: 56,
-                borderRadius: 12,
-                border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(0,0,0,0.25)",
-                cursor: "pointer",
-                padding: 0,
+                width: "100%",
+                borderRadius: 16,
+                display: "block",
               }}
-              title={t.label}
-              aria-label={t.label}
-            >
-              <div style={{ height: "100%", display: "grid", placeItems: "center", fontSize: 11, opacity: 0.85 }}>
-                {t.label}
+            />
+          </div>
+
+          {/* RIGHT ALBUMS */}
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
+              Available Albums
+            </div>
+
+            <Link to={PRODUCT_LINK} style={{ textDecoration: "none" }}>
+              <div
+                style={{
+                  background: "#14141a",
+                  borderRadius: 14,
+                  padding: 16,
+                  cursor: "pointer",
+                }}
+              >
+                <div
+                  style={{
+                    width: "100%",
+                    aspectRatio: "1 / 1",
+                    borderRadius: 10,
+                    background: "#222",
+                    marginBottom: 10,
+                  }}
+                />
+                <div style={{ color: "#fff", fontWeight: 600 }}>
+                  Album
+                </div>
               </div>
-            </button>
-          ))}
+            </Link>
+          </div>
         </div>
-
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.65 }}>Cosmetic thumbnails (not linked).</div>
-      </Card>
-
-      {/* Real thumbnail (links to Product) */}
-      <Card title="Featured">
-        <button
-          onClick={() => nav(`/product/${DEMO_SHARE_ID}`)}
-          style={{
-            width: "100%",
-            textAlign: "left",
-            borderRadius: 18,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(0,0,0,0.22)",
-            cursor: "pointer",
-            padding: 14,
-            display: "grid",
-            gridTemplateColumns: "120px 1fr",
-            gap: 14,
-            alignItems: "center",
-          }}
-        >
-          <div
-            style={{
-              height: 120,
-              width: 120,
-              borderRadius: 14,
-              background: "rgba(255,255,255,0.08)",
-              border: "1px solid rgba(255,255,255,0.10)",
-              display: "grid",
-              placeItems: "center",
-              fontSize: 12,
-              opacity: 0.9,
-            }}
-          >
-            Album
-          </div>
-
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 900, lineHeight: 1.15 }}>Demo Album</div>
-            <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>Click to open Product page</div>
-            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{DEMO_SHARE_ID}</div>
-          </div>
-        </button>
-      </Card>
+      </div>
     </div>
   );
 }
