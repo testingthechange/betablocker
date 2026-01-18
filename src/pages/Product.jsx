@@ -1,9 +1,15 @@
 // src/pages/Product.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
 const PREVIEW_SECONDS = 40;
+
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.min(max, Math.max(min, x));
+}
 
 function fmtTime(sec) {
   const n = Number(sec);
@@ -15,14 +21,13 @@ function fmtTime(sec) {
 
 export default function Product() {
   const { shareId } = useParams();
-  const navigate = useNavigate();
 
   const [parsed, setParsed] = useState(null);
   const [err, setErr] = useState(null);
 
-  // cover (manifest first, optional local preview fallback)
-  const [coverOverrideUrl, setCoverOverrideUrl] = useState("");
-  const coverFileRef = useRef(null);
+  // cover preview (local only, does not persist)
+  const [localCoverUrl, setLocalCoverUrl] = useState("");
+  const lastLocalCoverRef = useRef("");
 
   // player state
   const audioRef = useRef(null);
@@ -31,11 +36,8 @@ export default function Product() {
   const [curTime, setCurTime] = useState(0);
   const [dur, setDur] = useState(0);
 
-  // seek state (prevents frozen slider due to rapid state writes)
-  const seekingRef = useRef(false);
-
-  // preview cap uses its own timer so it cannot be bypassed
-  const capTimerRef = useRef(null);
+  // lets us start playback immediately after a click/auto-advance
+  const pendingAutoplayRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,14 +49,20 @@ export default function Product() {
         setParsed(v);
         setErr(null);
 
+        // reset state per shareId
         setActiveIdx(0);
         setPlaying(false);
         setCurTime(0);
         setDur(0);
 
-        // reset local cover override on share changes
-        setCoverOverrideUrl("");
-        if (coverFileRef.current) coverFileRef.current.value = "";
+        // reset local cover
+        if (lastLocalCoverRef.current) {
+          try {
+            URL.revokeObjectURL(lastLocalCoverRef.current);
+          } catch {}
+          lastLocalCoverRef.current = "";
+        }
+        setLocalCoverUrl("");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -69,63 +77,48 @@ export default function Product() {
   const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
   const activeTrack = tracks[activeIdx] || null;
 
-  // pick cover
   const coverUrl = useMemo(() => {
-    const fromManifest = String(parsed?.coverUrl || "").trim();
-    return coverOverrideUrl || fromManifest || "";
-  }, [parsed?.coverUrl, coverOverrideUrl]);
-
-  // clear cap timer
-  const clearCapTimer = () => {
-    if (capTimerRef.current) window.clearTimeout(capTimerRef.current);
-    capTimerRef.current = null;
-  };
-
-  // arm cap timer after play succeeds
-  const armCapTimer = () => {
-    clearCapTimer();
-    capTimerRef.current = window.setTimeout(() => {
-      const a = audioRef.current;
-      if (!a) return;
-      try {
-        a.pause();
-        a.currentTime = 0;
-      } catch {}
-      setPlaying(false);
-      setCurTime(0);
-    }, PREVIEW_SECONDS * 1000);
-  };
+    return localCoverUrl || parsed?.coverUrl || "";
+  }, [localCoverUrl, parsed?.coverUrl]);
 
   // keep audio src aligned with active track
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
-    clearCapTimer();
     setCurTime(0);
     setDur(0);
 
     const url = activeTrack?.playbackUrl;
+    try {
+      a.pause();
+      a.currentTime = 0;
+    } catch {}
+
     if (!url) {
-      try {
-        a.pause();
-        a.removeAttribute("src");
-        a.load();
-      } catch {}
       setPlaying(false);
       return;
     }
 
     try {
-      a.pause();
-      a.currentTime = 0;
       a.src = url;
       a.load();
-    } catch {}
-    // do not auto-play here; controlled by user action
+    } catch {
+      setPlaying(false);
+      return;
+    }
+
+    if (pendingAutoplayRef.current) {
+      pendingAutoplayRef.current = false;
+      a.play()
+        .then(() => {})
+        .catch(() => {
+          setPlaying(false);
+        });
+    }
   }, [activeTrack?.playbackUrl]);
 
-  // wire audio events + preview cap
+  // wire audio events + enforce preview cap + auto-advance
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -136,157 +129,125 @@ export default function Product() {
     };
 
     const onTime = () => {
-      if (seekingRef.current) return;
       const t = Number(a.currentTime || 0);
-      setCurTime(Number.isFinite(t) ? t : 0);
+      setCurTime(t);
 
-      // safety clamp (in case timer missed for any reason)
       if (t >= PREVIEW_SECONDS) {
         try {
           a.pause();
+        } catch {}
+        try {
           a.currentTime = 0;
         } catch {}
-        clearCapTimer();
-        setPlaying(false);
-        setCurTime(0);
+
+        const nextIdx = Math.min(tracks.length - 1, activeIdx + 1);
+
+        if (nextIdx !== activeIdx) {
+          pendingAutoplayRef.current = true;
+          setActiveIdx(nextIdx);
+        } else {
+          setPlaying(false);
+          setCurTime(0);
+        }
       }
     };
 
-    const onPlay = () => {
-      setPlaying(true);
-      // cap only after play succeeds
-      armCapTimer();
-    };
-
-    const onPause = () => {
-      setPlaying(false);
-      clearCapTimer();
-    };
-
-    const onEnded = () => {
-      setPlaying(false);
-      clearCapTimer();
-      setCurTime(0);
-      // advance track selection (does not autoplay next)
-      setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-    };
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
 
     a.addEventListener("loadedmetadata", onMeta);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
-    a.addEventListener("ended", onEnded);
 
     return () => {
       a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
-      a.removeEventListener("ended", onEnded);
     };
-  }, [tracks.length]);
+  }, [activeIdx, tracks.length]);
 
-  // controls
   const playIndex = (i) => {
     if (!tracks[i]?.playbackUrl) return;
+    pendingAutoplayRef.current = true;
     setActiveIdx(i);
-    // wait one tick for src effect to run
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (!a) return;
-      a.play().catch(() => {});
-    }, 0);
   };
 
   const togglePlay = () => {
     const a = audioRef.current;
     if (!a || !activeTrack?.playbackUrl) return;
+
     if (a.paused) a.play().catch(() => {});
     else a.pause();
   };
 
-  const prev = () => setActiveIdx((i) => Math.max(0, i - 1));
-  const next = () => setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-
-  // slider
-  const maxSeek = Math.min(dur || 0, PREVIEW_SECONDS);
-
-  const onSeekStart = () => {
-    seekingRef.current = true;
+  const prev = () => {
+    const nextIdx = Math.max(0, activeIdx - 1);
+    if (nextIdx === activeIdx) return;
+    pendingAutoplayRef.current = playing;
+    setActiveIdx(nextIdx);
   };
 
-  const onSeekMove = (e) => {
+  const next = () => {
+    const nextIdx = Math.min(tracks.length - 1, activeIdx + 1);
+    if (nextIdx === activeIdx) return;
+    pendingAutoplayRef.current = playing;
+    setActiveIdx(nextIdx);
+  };
+
+  const onSeek = (e) => {
+    const a = audioRef.current;
+    if (!a) return;
     const v = Number(e.target.value);
     if (!Number.isFinite(v)) return;
-    setCurTime(v);
-  };
 
-  const onSeekEnd = (e) => {
-    const a = audioRef.current;
-    seekingRef.current = false;
-    if (!a) return;
-
-    const v = Number(e.target.value);
-    const clamped = Number.isFinite(v) ? Math.min(v, PREVIEW_SECONDS) : 0;
-
+    const clamped = Math.min(v, PREVIEW_SECONDS);
     try {
       a.currentTime = clamped;
+      setCurTime(clamped);
     } catch {}
-    setCurTime(clamped);
+  };
 
-    // if seeking near/at cap, enforce stop immediately
-    if (clamped >= PREVIEW_SECONDS) {
+  const remaining = Math.max(0, PREVIEW_SECONDS - curTime);
+
+  const onPickCover = (file) => {
+    if (!file) return;
+    if (lastLocalCoverRef.current) {
       try {
-        a.pause();
-        a.currentTime = 0;
+        URL.revokeObjectURL(lastLocalCoverRef.current);
       } catch {}
-      clearCapTimer();
-      setPlaying(false);
-      setCurTime(0);
+      lastLocalCoverRef.current = "";
     }
+    const u = URL.createObjectURL(file);
+    lastLocalCoverRef.current = u;
+    setLocalCoverUrl(u);
   };
 
-  // cover local preview upload (does not persist)
-  const onChooseCover = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const url = URL.createObjectURL(f);
-    setCoverOverrideUrl((prevUrl) => {
-      if (prevUrl) {
-        try {
-          URL.revokeObjectURL(prevUrl);
-        } catch {}
-      }
-      return url;
-    });
+  const onResetCover = () => {
+    if (lastLocalCoverRef.current) {
+      try {
+        URL.revokeObjectURL(lastLocalCoverRef.current);
+      } catch {}
+      lastLocalCoverRef.current = "";
+    }
+    setLocalCoverUrl("");
   };
 
-  const resetCover = () => {
-    setCoverOverrideUrl((prevUrl) => {
-      if (prevUrl) {
-        try {
-          URL.revokeObjectURL(prevUrl);
-        } catch {}
-      }
-      return "";
-    });
-    if (coverFileRef.current) coverFileRef.current.value = "";
-  };
-
-  if (err) return <pre style={{ padding: 16 }}>{err}</pre>;
-  if (!parsed) return <div style={{ padding: 16 }}>Loading…</div>;
+  if (err) return <pre style={{ padding: 24 }}>{err}</pre>;
+  if (!parsed) return <div style={{ padding: 24 }}>Loading…</div>;
 
   return (
-    <>
-      {/* GLOBAL HEADER (centered) */}
+    <div style={{ minHeight: "100vh", background: "#0c0c0c", color: "#fff" }}>
+      {/* GLOBAL HEADER */}
       <header
         style={{
           position: "sticky",
           top: 0,
           zIndex: 100,
-          background: "#111",
-          color: "#fff",
-          borderBottom: "1px solid #2a2a2a",
+          background: "rgba(12,12,12,0.9)",
+          backdropFilter: "blur(8px)",
+          borderBottom: "1px solid rgba(255,255,255,0.08)",
         }}
       >
         <div
@@ -296,14 +257,14 @@ export default function Product() {
             padding: "12px 16px",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
             gap: 18,
+            justifyContent: "center",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <strong style={{ letterSpacing: 0.2 }}>Block Radius</strong>
+          <div style={{ display: "flex", alignItems: "center", gap: 18, width: "100%", maxWidth: 1100 }}>
+            <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>Block Radius</div>
 
-            <nav style={{ display: "flex", gap: 14, opacity: 0.95 }}>
+            <nav style={{ display: "flex", gap: 14, opacity: 0.9 }}>
               <Link to="/" style={{ color: "#fff", textDecoration: "none" }}>
                 Home
               </Link>
@@ -314,139 +275,122 @@ export default function Product() {
                 Account
               </Link>
             </nav>
-          </div>
 
-          <div style={{ flex: 1, maxWidth: 520 }}>
-            <input
-              value=""
-              readOnly
-              placeholder="Search (Directus placeholder)…"
+            <div style={{ flex: 1, display: "flex", justifyContent: "center" }}>
+              <input
+                placeholder="Search (Directus placeholder)…"
+                disabled
+                style={{
+                  width: "100%",
+                  maxWidth: 560,
+                  padding: "10px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  outline: "none",
+                }}
+              />
+            </div>
+
+            <button
+              type="button"
               style={{
-                width: "100%",
-                padding: "10px 12px",
                 borderRadius: 999,
-                border: "1px solid #2f2f2f",
-                background: "#161616",
-                color: "#fff",
-                outline: "none",
+                padding: "10px 14px",
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "#fff",
+                color: "#111",
+                fontWeight: 600,
+                cursor: "pointer",
               }}
-            />
+              onClick={() => alert("Login (Clerk placeholder)")}
+            >
+              Login
+            </button>
           </div>
-
-          <button
-            onClick={() => navigate("/login")}
-            style={{
-              borderRadius: 999,
-              padding: "8px 14px",
-              border: "1px solid #2f2f2f",
-              background: "#fff",
-              color: "#111",
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-            title="Login (Clerk placeholder)"
-          >
-            Login
-          </button>
         </div>
-
-        <div style={{ maxWidth: 1100, margin: "0 auto", padding: "6px 16px 10px", fontSize: 12, opacity: 0.7 }}>
-          Search is a placeholder; Shop will later query Directus. Login is a Clerk placeholder.
+        <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 16px 10px", fontSize: 12, opacity: 0.7 }}>
+          Search is a placeholder; Shop will later query Directus.
         </div>
       </header>
 
-      {/* PAGE WRAP (centered) */}
-      <div
-        style={{
-          minHeight: "100vh",
-          background: "#0b0b0b",
-          color: "#fff",
-        }}
-      >
-        <div style={{ maxWidth: 1100, margin: "0 auto", padding: 18, paddingBottom: 140 }}>
-          {/* 65/35 columns */}
+      {/* PAGE */}
+      <div style={{ padding: 18, paddingBottom: 120 }}>
+        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(0, 65fr) minmax(0, 35fr)",
+              gridTemplateColumns: "65% 35%",
               gap: 18,
               alignItems: "start",
             }}
           >
-            {/* LEFT: Album card + cover */}
+            {/* Left column */}
             <div
               style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
                 borderRadius: 18,
-                border: "1px solid #1f1f1f",
-                background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
-                boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
                 padding: 18,
+                minHeight: 360,
                 display: "grid",
-                gridTemplateColumns: "320px minmax(0,1fr)",
+                gridTemplateColumns: "280px 1fr",
                 gap: 18,
               }}
             >
+              {/* cover */}
               <div
                 style={{
                   borderRadius: 16,
-                  border: "1px solid #242424",
-                  background: "#0f0f0f",
                   overflow: "hidden",
-                  minHeight: 220,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  background: "rgba(0,0,0,0.35)",
+                  height: 280,
+                  display: "grid",
+                  placeItems: "center",
                 }}
               >
                 {coverUrl ? (
-                  <img
-                    src={coverUrl}
-                    alt="cover"
-                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    onError={() => {
-                      // if manifest cover is bad, fall back to none
-                      if (!coverOverrideUrl) return;
-                    }}
-                  />
+                  <img src={coverUrl} alt="cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 ) : (
-                  <div style={{ fontSize: 12, opacity: 0.6, padding: 12 }}>No cover in manifest</div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>No cover in manifest</div>
                 )}
               </div>
 
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1.05, marginBottom: 6 }}>
-                  {parsed.albumTitle || "Album"}
+              {/* album info */}
+              <div>
+                <div style={{ fontSize: 44, fontWeight: 800, lineHeight: 1.05 }}>Album</div>
+                <div style={{ marginTop: 10, fontSize: 14, opacity: 0.75 }}>
+                  shareId: {parsed.shareId || shareId}
+                </div>
+                <div style={{ marginTop: 10, fontSize: 14, opacity: 0.75 }}>
+                  Preview cap: <b>{PREVIEW_SECONDS}s</b>
                 </div>
 
-                {/* Drop verbose manifest metadata per request; keep minimal */}
-                <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 14 }}>
-                  Preview cap: {PREVIEW_SECONDS}s
-                </div>
-
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Cover</div>
+                <div style={{ marginTop: 18, fontSize: 13, opacity: 0.8 }}>Cover</div>
                 <div
                   style={{
-                    borderRadius: 12,
-                    border: "1px dashed #2a2a2a",
+                    marginTop: 8,
                     padding: 12,
-                    background: "#101010",
-                    display: "grid",
-                    gap: 10,
+                    borderRadius: 14,
+                    border: "1px dashed rgba(255,255,255,0.18)",
+                    background: "rgba(0,0,0,0.22)",
                   }}
                 >
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                  <div style={{ fontSize: 13, opacity: 0.85 }}>
                     Reads coverUrl from manifest. Local preview upload below (does not persist).
                   </div>
-
-                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <input ref={coverFileRef} type="file" accept="image/*" onChange={onChooseCover} />
+                  <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <input type="file" accept="image/*" onChange={(e) => onPickCover(e.target.files?.[0])} style={{ fontSize: 12 }} />
                     <button
-                      onClick={resetCover}
+                      type="button"
+                      onClick={onResetCover}
                       style={{
+                        borderRadius: 12,
                         padding: "8px 10px",
-                        borderRadius: 10,
-                        border: "1px solid #2a2a2a",
-                        background: "#171717",
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        background: "rgba(255,255,255,0.08)",
                         color: "#fff",
                         cursor: "pointer",
                       }}
@@ -455,44 +399,107 @@ export default function Product() {
                     </button>
                   </div>
                 </div>
+
+                {/* manifest meta card */}
+                <div
+                  style={{
+                    marginTop: 18,
+                    padding: 14,
+                    borderRadius: 16,
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    background: "rgba(255,255,255,0.03)",
+                  }}
+                >
+                  <div style={{ fontSize: 13, opacity: 0.7 }}>Manifest</div>
+                  <div style={{ marginTop: 8, display: "grid", gap: 6, fontSize: 14 }}>
+                    <div>
+                      <span style={{ opacity: 0.7 }}>albumTitle:</span> {parsed.albumTitle || "—"}
+                    </div>
+                    <div>
+                      <span style={{ opacity: 0.7 }}>artistName:</span> {parsed.meta?.artistName || "—"}
+                    </div>
+                    <div>
+                      <span style={{ opacity: 0.7 }}>releaseDate:</span> {parsed.meta?.releaseDate || "—"}
+                    </div>
+                    <div>
+                      <span style={{ opacity: 0.7 }}>projectId:</span> {parsed.projectId || "—"}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* RIGHT COLUMN: top card + tracks card */}
+            {/* Right column */}
             <div style={{ display: "grid", gap: 18 }}>
-              {/* NEW top card (requested) */}
+              {/* Now Playing */}
               <div
                 style={{
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
                   borderRadius: 18,
-                  border: "1px solid #1f1f1f",
-                  background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
-                  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
                   padding: 16,
                 }}
               >
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Now Playing</div>
-                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
-                  {activeTrack?.title || "—"}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {fmtTime(Math.min(curTime, PREVIEW_SECONDS))} / {fmtTime(PREVIEW_SECONDS)} · remaining{" "}
-                  {fmtTime(Math.max(0, PREVIEW_SECONDS - Math.min(curTime, PREVIEW_SECONDS)))}
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
+                <div style={{ marginTop: 10, fontSize: 20, fontWeight: 700 }}>{activeTrack?.title || "—"}</div>
+                <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
+                  {fmtTime(curTime)} / {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))} · remaining {fmtTime(remaining)}
                 </div>
               </div>
 
-              {/* Tracks card */}
+              {/* BUY CARD (no background, just the button) */}
+              <div style={{ padding: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => alert("Buy (placeholder)")}
+                  style={{
+                    width: "100%",
+                    borderRadius: 16,
+                    padding: "14px 16px",
+                    border: "1px solid rgba(0,0,0,0.0)",
+                    background: "#22c55e",
+                    color: "#0b0b0b",
+                    fontWeight: 900,
+                    fontSize: 16,
+                    cursor: "pointer",
+                  }}
+                >
+                  Buy $19.50
+                </button>
+              </div>
+
+              {/* MARKETING CARD */}
               <div
                 style={{
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
                   borderRadius: 18,
-                  border: "1px solid #1f1f1f",
-                  background: "linear-gradient(180deg, #121212 0%, #0d0d0d 100%)",
-                  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
                   padding: 16,
                 }}
               >
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 20, fontWeight: 800 }}>Tracks</div>
-                  <div style={{ fontSize: 12, opacity: 0.65 }}>{tracks.length}</div>
+                <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 10 }}>Includes</div>
+                <div style={{ display: "grid", gap: 8, fontSize: 14, opacity: 0.92 }}>
+                  <div>• 8 songs</div>
+                  <div>• Smart Bridge mode</div>
+                  <div>• Album mode</div>
+                  <div>• Artist control</div>
+                  <div>• Over 60 minutes of bonus authored bridge content</div>
+                  <div>• FREE MP3 album mix download included</div>
+                </div>
+              </div>
+
+              {/* Tracks */}
+              <div
+                style={{
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 18,
+                  padding: 16,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <div style={{ fontSize: 18, fontWeight: 800 }}>Tracks</div>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>{tracks.length}</}</div>
                 </div>
 
                 <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
@@ -506,135 +513,128 @@ export default function Product() {
                           textAlign: "left",
                           padding: "12px 12px",
                           borderRadius: 14,
-                          border: "1px solid #202020",
-                          background: isActive ? "#1a1a1a" : "#111",
+                          border: "1px solid rgba(255,255,255,0.10)",
+                          background: isActive ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.15)",
                           color: "#fff",
                           cursor: "pointer",
                           display: "flex",
-                          alignItems: "center",
                           justifyContent: "space-between",
+                          alignItems: "center",
                           gap: 12,
                         }}
                       >
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {t.title}
                         </span>
-                        <span style={{ fontSize: 12, opacity: 0.65 }}>
-                          {t.durationSec ? fmtTime(t.durationSec) : ""}
-                        </span>
+                        <span style={{ fontSize: 12, opacity: 0.7 }}>{t.durationSec ? fmtTime(t.durationSec) : ""}</span>
                       </button>
                     );
                   })}
                 </div>
               </div>
-
-              {/* move tracks "lower right bottom of second column": achieved by stacking top card then tracks */}
             </div>
           </div>
 
-          {/* audio element (no native controls) */}
+          {/* Hidden audio (no native controls => no 3-dot menu) */}
           <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
         </div>
+      </div>
 
-        {/* BOTTOM PLAYER (no 3-dot menu) */}
-        <div
-          style={{
-            position: "fixed",
-            left: 0,
-            right: 0,
-            bottom: 0,
-            borderTop: "1px solid #1f1f1f",
-            background: "#0f0f0f",
-            padding: "12px 12px",
-          }}
-        >
-          <div style={{ maxWidth: 1100, margin: "0 auto", display: "grid", gap: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
-                <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {activeTrack?.title || "—"}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.65 }}>Preview cap: {PREVIEW_SECONDS}s</div>
+      {/* Bottom player (design unchanged) */}
+      <div
+        style={{
+          position: "fixed",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+          background: "rgba(12,12,12,0.92)",
+          backdropFilter: "blur(10px)",
+          padding: "10px 12px",
+        }}
+      >
+        <div style={{ maxWidth: 1100, margin: "0 auto", display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
+              <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {activeTrack ? activeTrack.title : "—"}
               </div>
-
-              <div style={{ display: "flex", gap: 10 }}>
-                <button
-                  onClick={prev}
-                  disabled={activeIdx <= 0}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 12,
-                    border: "1px solid #262626",
-                    background: "#141414",
-                    color: "#fff",
-                    cursor: activeIdx <= 0 ? "not-allowed" : "pointer",
-                    opacity: activeIdx <= 0 ? 0.5 : 1,
-                  }}
-                >
-                  Prev
-                </button>
-                <button
-                  onClick={togglePlay}
-                  disabled={!activeTrack?.playbackUrl}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 12,
-                    border: "1px solid #262626",
-                    background: "#fff",
-                    color: "#111",
-                    fontWeight: 800,
-                    cursor: !activeTrack?.playbackUrl ? "not-allowed" : "pointer",
-                    opacity: !activeTrack?.playbackUrl ? 0.6 : 1,
-                  }}
-                >
-                  {playing ? "Pause" : "Play"}
-                </button>
-                <button
-                  onClick={next}
-                  disabled={activeIdx >= tracks.length - 1}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 12,
-                    border: "1px solid #262626",
-                    background: "#141414",
-                    color: "#fff",
-                    cursor: activeIdx >= tracks.length - 1 ? "not-allowed" : "pointer",
-                    opacity: activeIdx >= tracks.length - 1 ? 0.5 : 1,
-                  }}
-                >
-                  Next
-                </button>
-              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>Preview cap: {PREVIEW_SECONDS}s</div>
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 56, textAlign: "right", fontSize: 12, opacity: 0.75 }}>
-                {fmtTime(Math.min(curTime, PREVIEW_SECONDS))}
-              </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={prev}
+                disabled={activeIdx <= 0}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  cursor: activeIdx <= 0 ? "not-allowed" : "pointer",
+                  opacity: activeIdx <= 0 ? 0.5 : 1,
+                }}
+              >
+                Prev
+              </button>
 
-              <input
-                type="range"
-                min={0}
-                max={Math.max(0, maxSeek)}
-                step="0.01"
-                value={Math.min(curTime, maxSeek)}
-                onMouseDown={onSeekStart}
-                onTouchStart={onSeekStart}
-                onChange={onSeekMove}
-                onMouseUp={onSeekEnd}
-                onTouchEnd={onSeekEnd}
-                style={{ width: "100%" }}
+              <button
+                onClick={togglePlay}
                 disabled={!activeTrack?.playbackUrl}
-              />
+                style={{
+                  padding: "10px 18px",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "#fff",
+                  color: "#111",
+                  fontWeight: 700,
+                  cursor: !activeTrack?.playbackUrl ? "not-allowed" : "pointer",
+                  opacity: !activeTrack?.playbackUrl ? 0.6 : 1,
+                }}
+              >
+                {playing ? "Pause" : "Play"}
+              </button>
 
-              <div style={{ width: 56, fontSize: 12, opacity: 0.75 }}>
-                {fmtTime(PREVIEW_SECONDS)}
-              </div>
+              <button
+                onClick={next}
+                disabled={activeIdx >= tracks.length - 1}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  cursor: activeIdx >= tracks.length - 1 ? "not-allowed" : "pointer",
+                  opacity: activeIdx >= tracks.length - 1 ? 0.5 : 1,
+                }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 52, textAlign: "right", fontSize: 12, opacity: 0.75 }}>{fmtTime(curTime)}</div>
+
+            <input
+              type="range"
+              min={0}
+              max={Math.min(dur || 0, PREVIEW_SECONDS)}
+              step="0.01"
+              value={clamp(curTime, 0, Math.min(dur || 0, PREVIEW_SECONDS))}
+              onChange={onSeek}
+              style={{ width: "100%" }}
+              disabled={!dur}
+            />
+
+            <div style={{ width: 52, fontSize: 12, opacity: 0.75 }}>
+              {fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}
             </div>
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
