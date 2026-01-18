@@ -1,5 +1,6 @@
+// src/pages/Product.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 import { fetchManifest, validateManifest } from "../lib/manifest.js";
 
 const PREVIEW_SECONDS = 40;
@@ -25,27 +26,9 @@ export default function Product() {
   const [dur, setDur] = useState(0);
 
   useEffect(() => {
-    let cancelled = false;
-
     fetchManifest(shareId)
-      .then((m) => {
-        if (cancelled) return;
-        const v = validateManifest(m);
-        setParsed(v);
-        setErr(null);
-        setActiveIdx(0);
-        setPlaying(false);
-        setCurTime(0);
-        setDur(0);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setErr(String(e?.message || e));
-      });
-
-    return () => {
-      cancelled = true;
-    };
+      .then((m) => setParsed(validateManifest(m)))
+      .catch((e) => setErr(String(e?.message || e)));
   }, [shareId]);
 
   const tracks = useMemo(() => parsed?.tracks || [], [parsed]);
@@ -55,23 +38,14 @@ export default function Product() {
     const a = audioRef.current;
     if (!a) return;
 
-    setCurTime(0);
-    setDur(0);
-
     const url = activeTrack?.playbackUrl;
-    if (!url) {
-      try {
-        a.pause();
-      } catch {}
-      setPlaying(false);
-      return;
-    }
-
     try {
       a.pause();
       a.currentTime = 0;
-      a.src = url;
-      a.load();
+      if (url) {
+        a.src = url;
+        a.load();
+      }
     } catch {}
   }, [activeTrack?.playbackUrl]);
 
@@ -79,171 +53,134 @@ export default function Product() {
     const a = audioRef.current;
     if (!a) return;
 
-    const onMeta = () => setDur(a.duration || 0);
     const onTime = () => {
-      const t = a.currentTime || 0;
-      setCurTime(t);
-
-      if (t >= PREVIEW_SECONDS) {
-        try {
-          a.pause();
-          a.currentTime = 0;
-        } catch {}
+      setCurTime(a.currentTime || 0);
+      if (a.currentTime >= PREVIEW_SECONDS) {
+        a.pause();
+        a.currentTime = 0;
         setPlaying(false);
-        setCurTime(0);
       }
     };
+
+    const onMeta = () => setDur(a.duration || 0);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
 
-    a.addEventListener("loadedmetadata", onMeta);
     a.addEventListener("timeupdate", onTime);
+    a.addEventListener("loadedmetadata", onMeta);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
 
     return () => {
-      a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("timeupdate", onTime);
+      a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
     };
   }, []);
 
   const playIndex = (i) => {
-    if (!tracks[i]?.playbackUrl) return;
     setActiveIdx(i);
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (!a) return;
-      a.play().catch(() => {});
-    }, 0);
-  };
-
-  const togglePlay = () => {
-    const a = audioRef.current;
-    if (!a || !activeTrack?.playbackUrl) return;
-    if (a.paused) a.play().catch(() => {});
-    else a.pause();
-  };
-
-  const prev = () => {
-    setActiveIdx((i) => Math.max(0, i - 1));
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (a && playing) a.play().catch(() => {});
-    }, 0);
-  };
-
-  const next = () => {
-    setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (a && playing) a.play().catch(() => {});
-    }, 0);
-  };
-
-  const onSeek = (e) => {
-    const a = audioRef.current;
-    if (!a) return;
-    const v = Number(e.target.value);
-    if (!Number.isFinite(v)) return;
-    const clamped = Math.min(v, PREVIEW_SECONDS);
-    try {
-      a.currentTime = clamped;
-      setCurTime(clamped);
-    } catch {}
+    setTimeout(() => audioRef.current?.play().catch(() => {}), 0);
   };
 
   if (err) return <pre>{err}</pre>;
   if (!parsed) return <div>Loading…</div>;
 
   return (
-    <div style={{ padding: 24, paddingBottom: 120, maxWidth: 900 }}>
-      <h1>{parsed.albumTitle}</h1>
-
-      <div style={{ display: "grid", gap: 10 }}>
-        {tracks.map((t, i) => {
-          const isActive = i === activeIdx;
-          return (
-            <button
-              key={i}
-              onClick={() => playIndex(i)}
-              style={{
-                textAlign: "left",
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid #e5e5e5",
-                background: isActive ? "#f5f5f5" : "#fff",
-                cursor: "pointer",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 12,
-              }}
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {t.title}
-              </span>
-              <span style={{ fontSize: 12, opacity: 0.7 }}>
-                {t.durationSec ? fmtTime(t.durationSec) : ""}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      <audio ref={audioRef} data-audio="product" preload="metadata" playsInline />
-
-      <div
+    <>
+      {/* GLOBAL HEADER */}
+      <header
         style={{
-          position: "fixed",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          borderTop: "1px solid #e5e5e5",
-          background: "#fff",
-          padding: "10px 12px",
+          position: "sticky",
+          top: 0,
+          zIndex: 100,
+          background: "#111",
+          color: "#fff",
+          borderBottom: "1px solid #333",
         }}
       >
-        <div style={{ maxWidth: 900, margin: "0 auto", display: "grid", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
-              <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {activeTrack ? activeTrack.title : "—"}
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Preview: {PREVIEW_SECONDS}s max</div>
-            </div>
+        <div
+          style={{
+            maxWidth: 1100,
+            margin: "0 auto",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 20,
+          }}
+        >
+          <strong>Block Radius</strong>
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={prev} disabled={activeIdx <= 0} style={{ padding: "8px 10px" }}>
-                Prev
-              </button>
-              <button onClick={togglePlay} disabled={!activeTrack?.playbackUrl} style={{ padding: "8px 10px" }}>
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button onClick={next} disabled={activeIdx >= tracks.length - 1} style={{ padding: "8px 10px" }}>
-                Next
-              </button>
-            </div>
+          <nav style={{ display: "flex", gap: 14 }}>
+            <Link to="/" style={{ color: "#fff", textDecoration: "none" }}>
+              Home
+            </Link>
+            <Link to="/shop" style={{ color: "#fff", textDecoration: "none" }}>
+              Shop
+            </Link>
+            <Link to="/account" style={{ color: "#fff", textDecoration: "none" }}>
+              Account
+            </Link>
+          </nav>
+
+          <div style={{ marginLeft: "auto" }}>
+            <Link to="/login" style={{ color: "#fff", textDecoration: "none" }}>
+              Login
+            </Link>
           </div>
+        </div>
+      </header>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 48, textAlign: "right", fontSize: 12, opacity: 0.75 }}>{fmtTime(curTime)}</div>
-            <input
-              type="range"
-              min={0}
-              max={Math.min(dur || 0, PREVIEW_SECONDS)}
-              step="0.01"
-              value={Math.min(curTime, Math.min(dur || 0, PREVIEW_SECONDS))}
-              onChange={onSeek}
-              style={{ width: "100%" }}
-              disabled={!dur}
-            />
-            <div style={{ width: 48, fontSize: 12, opacity: 0.75 }}>{fmtTime(Math.min(dur || 0, PREVIEW_SECONDS))}</div>
+      {/* PAGE */}
+      <div style={{ padding: 24, paddingBottom: 120 }}>
+        <h1>{parsed.albumTitle}</h1>
+
+        {tracks.map((t, i) => (
+          <button
+            key={i}
+            onClick={() => playIndex(i)}
+            style={{
+              display: "block",
+              width: "100%",
+              textAlign: "left",
+              padding: "10px",
+              marginBottom: 8,
+            }}
+          >
+            {t.title}
+          </button>
+        ))}
+
+        <audio ref={audioRef} data-audio="product" preload="metadata" />
+
+        {/* BOTTOM PLAYER */}
+        <div
+          style={{
+            position: "fixed",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            background: "#222",
+            color: "#fff",
+            borderTop: "1px solid #333",
+            padding: 12,
+          }}
+        >
+          <div style={{ maxWidth: 900, margin: "0 auto" }}>
+            <div>{activeTrack?.title || "—"}</div>
+            <div style={{ fontSize: 12 }}>
+              {fmtTime(curTime)} / {fmtTime(Math.min(dur, PREVIEW_SECONDS))}
+            </div>
+            <button onClick={() => audioRef.current?.play()} disabled={playing}>
+              Play
+            </button>
+            <button onClick={() => audioRef.current?.pause()} disabled={!playing}>
+              Pause
+            </button>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
