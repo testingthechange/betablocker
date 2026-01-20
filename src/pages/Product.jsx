@@ -1,155 +1,477 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 /**
- * RECEIVER BUILD
- * BUILD: RECEIVER-2026-01-19-A
- * Purpose: Render published album from S3 manifest
+ * RECEIVER (handoff-only)
+ * Truth source: public S3 manifest
+ *   https://block-7306-player.s3.us-west-1.amazonaws.com/public/players/<shareId>/manifest.json
+ *
+ * No backend dependency.
  */
+
+const BUILD_STAMP = "RECEIVER-2026-01-19-A";
+
+// === CONFIG: receiver truth ===
+const S3_MANIFEST_BASE =
+  "https://block-7306-player.s3.us-west-1.amazonaws.com/public/players";
+
+function s3ManifestUrl(shareId) {
+  return `${S3_MANIFEST_BASE}/${encodeURIComponent(shareId)}/manifest.json`;
+}
+
+function fmtTime(sec) {
+  const s = Math.max(0, Number(sec || 0));
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
 
 export default function Product() {
   const { shareId } = useParams();
 
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
   const [manifest, setManifest] = useState(null);
-  const [activeTrack, setActiveTrack] = useState(null);
+
+  const tracks = useMemo(() => {
+    const t = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
+    // stable ordering by slot
+    return [...t].sort((a, b) => (Number(a?.slot || 0) - Number(b?.slot || 0)));
+  }, [manifest]);
+
+  const [activeIdx, setActiveIdx] = useState(0);
+  const activeTrack = tracks[activeIdx] || null;
 
   const audioRef = useRef(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [curTime, setCurTime] = useState(0);
+  const [dur, setDur] = useState(0);
 
-  // ----------------------------
-  // Load manifest
-  // ----------------------------
+  // Load manifest (S3 only)
   useEffect(() => {
-    if (!shareId) return;
+    let cancelled = false;
 
-    fetch(`/publish/${shareId}.json`)
-      .then((r) => {
-        if (!r.ok) throw new Error("Manifest not found");
-        return r.json();
-      })
-      .then((data) => {
-        setManifest(data);
-        if (data?.tracks?.length) {
-          setActiveTrack(data.tracks[0]);
+    async function run() {
+      try {
+        setLoading(true);
+        setErr("");
+        setManifest(null);
+
+        if (!shareId) throw new Error("Missing shareId");
+
+        const url = s3ManifestUrl(shareId);
+
+        // Avoid stale caches in browsers/CDNs
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) throw new Error(`Manifest HTTP ${res.status}`);
+
+        const json = await res.json();
+        if (!json || typeof json !== "object") throw new Error("Invalid manifest JSON");
+
+        if (!cancelled) {
+          setManifest(json);
+          setActiveIdx(0);
+          setLoading(false);
         }
-      })
-      .catch((err) => {
-        console.error("PRODUCT LOAD ERROR", err);
-      });
+      } catch (e) {
+        if (!cancelled) {
+          setErr(String(e?.message || e));
+          setLoading(false);
+        }
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, [shareId]);
 
-  // ----------------------------
-  // Auto-play on track change
-  // ----------------------------
+  // When track changes, load into audio and optionally autoplay
   useEffect(() => {
-    if (!audioRef.current || !activeTrack?.playbackUrl) return;
-    audioRef.current.load();
-    audioRef.current.play().catch(() => {});
-  }, [activeTrack]);
+    const a = audioRef.current;
+    if (!a) return;
 
-  if (!manifest) {
-    return (
-      <div className="p-10 text-sm opacity-60">
-        Loading album…
-      </div>
-    );
+    const url = activeTrack?.playbackUrl || "";
+    if (!url) return;
+
+    // set src + load
+    a.src = url;
+    a.load();
+
+    // attempt autoplay if user already hit play
+    if (isPlaying) {
+      a.play().catch(() => {
+        // autoplay may be blocked; keep UI as paused
+        setIsPlaying(false);
+      });
+    }
+
+    // reset timers
+    setCurTime(0);
+    setDur(0);
+  }, [activeTrack?.playbackUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Wire audio events
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onTime = () => setCurTime(a.currentTime || 0);
+    const onMeta = () => setDur(a.duration || 0);
+    const onEnded = () => {
+      // auto-next
+      if (tracks.length > 0) {
+        const next = Math.min(activeIdx + 1, tracks.length - 1);
+        if (next !== activeIdx) setActiveIdx(next);
+        else setIsPlaying(false);
+      } else {
+        setIsPlaying(false);
+      }
+    };
+
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
+    a.addEventListener("timeupdate", onTime);
+    a.addEventListener("loadedmetadata", onMeta);
+    a.addEventListener("ended", onEnded);
+
+    return () => {
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
+      a.removeEventListener("timeupdate", onTime);
+      a.removeEventListener("loadedmetadata", onMeta);
+      a.removeEventListener("ended", onEnded);
+    };
+  }, [activeIdx, tracks.length]);
+
+  function togglePlay() {
+    const a = audioRef.current;
+    if (!a) return;
+
+    if (isPlaying) {
+      a.pause();
+      return;
+    }
+
+    // If no src yet but we have a track, set it.
+    if (!a.src && activeTrack?.playbackUrl) {
+      a.src = activeTrack.playbackUrl;
+      a.load();
+    }
+
+    a.play().catch(() => {
+      setIsPlaying(false);
+    });
   }
 
+  function prev() {
+    if (tracks.length === 0) return;
+    setActiveIdx((i) => Math.max(0, i - 1));
+  }
+
+  function next() {
+    if (tracks.length === 0) return;
+    setActiveIdx((i) => Math.min(tracks.length - 1, i + 1));
+  }
+
+  function onScrub(e) {
+    const a = audioRef.current;
+    if (!a) return;
+    const v = Number(e.target.value || 0);
+    a.currentTime = v;
+    setCurTime(v);
+  }
+
+  const albumTitle = manifest?.albumTitle || manifest?.meta?.albumTitle || "Album";
+  const artistName = manifest?.meta?.artistName || "";
+  const releaseDate = manifest?.meta?.releaseDate || "";
+  const coverUrl = manifest?.coverUrl || "";
+
+  // ====== UI ======
   return (
-    <div className="max-w-7xl mx-auto px-6 pb-32">
-
-      {/* BUILD STAMP */}
-      <div className="text-xs opacity-50 mb-3">
-        BUILD: RECEIVER-2026-01-19-A
+    <div style={{ padding: 24 }}>
+      {/* BUILD STAMP (visible, small) */}
+      <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>
+        BUILD: {BUILD_STAMP}
       </div>
 
-      {/* TITLE */}
-      <h1 className="text-3xl font-semibold mb-6">
-        {manifest.albumTitle || "Album"}
-      </h1>
-
-      {/* TWO COLUMN LAYOUT */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-
-        {/* LEFT COLUMN — COVER */}
-        <div className="rounded-xl overflow-hidden bg-black">
-          {manifest.coverUrl ? (
-            <img
-              src={manifest.coverUrl}
-              alt="Album cover"
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="aspect-square flex items-center justify-center opacity-40">
-              No cover
-            </div>
-          )}
+      {loading && (
+        <div style={{ fontSize: 28, fontWeight: 700, opacity: 0.9 }}>
+          Loading album...
         </div>
+      )}
 
-        {/* RIGHT COLUMN */}
-        <div className="flex flex-col gap-6">
+      {!loading && err && (
+        <div style={{ maxWidth: 900 }}>
+          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>
+            Failed to load manifest
+          </div>
+          <div style={{ opacity: 0.85, marginBottom: 8 }}>{err}</div>
+          <div style={{ fontSize: 12, opacity: 0.65 }}>
+            Expected S3 manifest:
+            <div>{shareId ? s3ManifestUrl(shareId) : "(missing shareId)"}</div>
+          </div>
+        </div>
+      )}
 
-          {/* ALBUM INFO (TOP) */}
-          <div className="rounded-xl border border-white/10 p-4">
-            <div className="text-sm opacity-60 mb-1">Album Info</div>
-            <div className="font-medium">{manifest.albumTitle}</div>
-            {manifest.meta?.artistName && (
-              <div className="opacity-80">{manifest.meta.artistName}</div>
-            )}
-            {manifest.meta?.releaseDate && (
-              <div className="text-sm opacity-60">
-                Release date: {manifest.meta.releaseDate}
-              </div>
-            )}
+      {!loading && !err && (
+        <>
+          <div style={{ fontSize: 44, fontWeight: 800, marginBottom: 12 }}>
+            {albumTitle}
           </div>
 
-          {/* TRACK LIST */}
-          <div className="rounded-xl border border-white/10 p-4">
-            <div className="text-sm opacity-60 mb-2">Tracks</div>
-
-            <ul className="space-y-2">
-              {manifest.tracks.map((t) => (
-                <li
-                  key={t.slot}
-                  onClick={() => setActiveTrack(t)}
-                  className={`cursor-pointer rounded-md px-3 py-2 ${
-                    activeTrack?.slot === t.slot
-                      ? "bg-white/10"
-                      : "hover:bg-white/5"
-                  }`}
-                >
-                  {t.slot}. {t.title}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-        </div>
-      </div>
-
-      {/* PLAYER (BOTTOM, FIXED) */}
-      <div className="fixed bottom-0 left-0 right-0 bg-black/90 backdrop-blur border-t border-white/10 px-6 py-3">
-        <div className="max-w-7xl mx-auto flex items-center gap-4">
-
-          <button
-            onClick={() => audioRef.current?.play()}
-            className="px-3 py-1 border rounded"
+          {/* Two-column layout */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(480px, 1fr) 420px",
+              gap: 18,
+              alignItems: "start",
+              paddingBottom: 120, // room for bottom player
+            }}
           >
-            ▶
-          </button>
+            {/* LEFT COLUMN: COVER CARD */}
+            <div
+              style={{
+                borderRadius: 18,
+                overflow: "hidden",
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                minHeight: 520,
+              }}
+            >
+              <div style={{ padding: 14, fontSize: 18, fontWeight: 700 }}>Album</div>
+              <div style={{ padding: 14, paddingTop: 0 }}>
+                <div
+                  style={{
+                    width: "100%",
+                    aspectRatio: "16 / 9",
+                    borderRadius: 14,
+                    overflow: "hidden",
+                    background: "rgba(0,0,0,0.35)",
+                    border: "1px solid rgba(255,255,255,0.10)",
+                  }}
+                >
+                  {coverUrl ? (
+                    <img
+                      src={coverUrl}
+                      alt="cover"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover", // FULL SIZE IN CARD
+                        display: "block",
+                      }}
+                      onError={() => {
+                        // keep page stable; no crash
+                        // eslint-disable-next-line no-console
+                        console.warn("cover image failed to load", coverUrl);
+                      }}
+                    />
+                  ) : (
+                    <div style={{ padding: 16, opacity: 0.7 }}>
+                      No coverUrl in manifest.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
 
-          <div className="flex-1 truncate">
-            {activeTrack ? activeTrack.title : "—"}
+            {/* RIGHT COLUMN: ALBUM INFO (TOP) + TRACKS */}
+            <div style={{ display: "grid", gap: 14 }}>
+              {/* Album Info card at TOP of column 2 */}
+              <div
+                style={{
+                  borderRadius: 18,
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  padding: 16,
+                }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 10 }}>
+                  Album Info
+                </div>
+
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Album name</div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>{albumTitle}</div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Performer</div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>
+                      {artistName || "—"}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Release date</div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>
+                      {releaseDate || "—"}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>Total album time</div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>
+                      {dur ? fmtTime(dur) : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Tracks card */}
+              <div
+                style={{
+                  borderRadius: 18,
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  padding: 16,
+                }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 10 }}>
+                  Tracks
+                </div>
+
+                {tracks.length === 0 ? (
+                  <div style={{ opacity: 0.7 }}>No tracks in manifest.</div>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {tracks.map((t, idx) => {
+                      const isActive = idx === activeIdx;
+                      return (
+                        <button
+                          key={`${t.slot}-${idx}`}
+                          onClick={() => setActiveIdx(idx)}
+                          style={{
+                            textAlign: "left",
+                            borderRadius: 12,
+                            padding: "10px 12px",
+                            border: "1px solid rgba(255,255,255,0.10)",
+                            background: isActive
+                              ? "rgba(255,255,255,0.14)"
+                              : "rgba(0,0,0,0.22)",
+                            color: "inherit",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <div style={{ fontWeight: 800 }}>
+                            {t.slot}. {t.title || `Track ${t.slot}`}
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.7 }}>
+                            {t.durationSec ? fmtTime(t.durationSec) : ""}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
-          <audio ref={audioRef} controls className="hidden">
-            {activeTrack?.playbackUrl && (
-              <source src={activeTrack.playbackUrl} />
-            )}
-          </audio>
+          {/* Bottom player */}
+          <div
+            style={{
+              position: "fixed",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              padding: "14px 18px",
+              background: "rgba(0,0,0,0.60)",
+              backdropFilter: "blur(10px)",
+              borderTop: "1px solid rgba(255,255,255,0.10)",
+            }}
+          >
+            <div
+              style={{
+                maxWidth: 1200,
+                margin: "0 auto",
+                display: "grid",
+                gridTemplateColumns: "120px 1fr 220px",
+                gap: 14,
+                alignItems: "center",
+              }}
+            >
+              <button
+                onClick={togglePlay}
+                style={{
+                  height: 44,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  background: "rgba(255,255,255,0.10)",
+                  color: "inherit",
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                {isPlaying ? "Pause" : "Play"}
+              </button>
 
-        </div>
-      </div>
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Now Playing</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>
+                  {activeTrack ? activeTrack.title : "—"}
+                </div>
 
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, dur || 0)}
+                  step="0.25"
+                  value={Math.min(curTime, dur || 0)}
+                  onChange={onScrub}
+                  style={{ width: "100%" }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.7 }}>
+                  <span>{fmtTime(curTime)}</span>
+                  <span>{fmtTime(dur)}</span>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <button
+                  onClick={prev}
+                  style={{
+                    height: 44,
+                    padding: "0 14px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "inherit",
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={next}
+                  style={{
+                    height: 44,
+                    padding: "0 14px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(255,255,255,0.18)",
+                    background: "rgba(255,255,255,0.08)",
+                    color: "inherit",
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+
+              {/* Hidden audio element */}
+              <audio ref={audioRef} preload="metadata" />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
