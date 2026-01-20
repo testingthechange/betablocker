@@ -3,8 +3,8 @@ import { useParams } from "react-router-dom";
 
 /**
  * RECEIVER (LOCKED)
- * Source of truth: public S3 manifest
- * BUILD: RECEIVER-2026-01-20-B
+ * BUILD: RECEIVER-2026-01-20-C
+ * Player reset: click → play (no autoplay, no fighting state)
  */
 
 const S3_MANIFEST_BASE =
@@ -27,9 +27,9 @@ export default function Product() {
   const [manifest, setManifest] = useState(null);
   const [err, setErr] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
+  const [playing, setPlaying] = useState(false);
 
   const audioRef = useRef(null);
 
@@ -62,18 +62,18 @@ export default function Product() {
     return () => (cancel = true);
   }, [shareId]);
 
-  // Sync audio when track changes
+  // When track changes: load ONLY (no autoplay)
   useEffect(() => {
     const a = audioRef.current;
     if (!a || !active?.playbackUrl) return;
     a.src = active.playbackUrl;
     a.load();
-    if (playing) a.play().catch(() => setPlaying(false));
+    setPlaying(false);
     setCur(0);
     setDur(0);
-  }, [active?.playbackUrl]); // eslint-disable-line
+  }, [active?.playbackUrl]);
 
-  // Audio events
+  // Audio events (truth comes from audio element)
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -93,11 +93,16 @@ export default function Product() {
     };
   }, []);
 
-  function toggle() {
+  function play() {
     const a = audioRef.current;
     if (!a) return;
-    if (playing) a.pause();
-    else a.play().catch(() => setPlaying(false));
+    a.play().catch(() => {});
+  }
+
+  function pause() {
+    const a = audioRef.current;
+    if (!a) return;
+    a.pause();
   }
 
   if (err) return <div style={{ padding: 24 }}>Error: {err}</div>;
@@ -111,57 +116,37 @@ export default function Product() {
   return (
     <div style={{ padding: 24, paddingBottom: 120 }}>
       <div style={{ fontSize: 12, opacity: 0.6 }}>
-        BUILD: RECEIVER-2026-01-20-B
+        BUILD: RECEIVER-2026-01-20-C
       </div>
 
-      <h1 style={{ fontSize: 36, fontWeight: 800, marginBottom: 16 }}>
-        {album}
-      </h1>
+      <h1 style={{ fontSize: 36, fontWeight: 800 }}>{album}</h1>
 
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "2fr 1fr",
           gap: 16,
+          marginTop: 16,
         }}
       >
-        {/* LEFT COLUMN — COVER */}
-        <div
-          style={{
-            borderRadius: 16,
-            overflow: "hidden",
-            background: "#111",
-          }}
-        >
+        {/* LEFT */}
+        <div style={{ borderRadius: 16, overflow: "hidden" }}>
           <img
             src={cover}
             alt="cover"
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              display: "block",
-            }}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         </div>
 
-        {/* RIGHT COLUMN */}
+        {/* RIGHT */}
         <div style={{ display: "grid", gap: 12 }}>
-          {/* Album Info */}
-          <div
-            style={{
-              padding: 16,
-              border: "1px solid #333",
-              borderRadius: 16,
-            }}
-          >
+          <div style={{ padding: 16, border: "1px solid #333", borderRadius: 16 }}>
             <strong>Album Info</strong>
             <div>{album}</div>
             <div>{artist}</div>
             <div>{date}</div>
           </div>
 
-          {/* Buy Button */}
           <button
             style={{
               padding: 14,
@@ -171,37 +156,12 @@ export default function Product() {
               background: "#6ee7b7",
               color: "#000",
               border: "none",
-              cursor: "pointer",
             }}
           >
             Buy — $19.50
           </button>
 
-          {/* Marketing Card */}
-          <div
-            style={{
-              padding: 16,
-              border: "1px solid #333",
-              borderRadius: 16,
-            }}
-          >
-            <strong>What you get</strong>
-            <ul style={{ marginTop: 8 }}>
-              <li>Full album access</li>
-              <li>Smart bridge playback</li>
-              <li>Authored transitions</li>
-              <li>MP3 download</li>
-            </ul>
-          </div>
-
-          {/* Track List */}
-          <div
-            style={{
-              padding: 16,
-              border: "1px solid #333",
-              borderRadius: 16,
-            }}
-          >
+          <div style={{ padding: 16, border: "1px solid #333", borderRadius: 16 }}>
             <strong>Tracks</strong>
             {tracks.map((t, i) => (
               <div
@@ -209,7 +169,7 @@ export default function Product() {
                 onClick={() => setActiveIdx(i)}
                 style={{
                   cursor: "pointer",
-                  padding: "6px 4px",
+                  padding: 6,
                   background: i === activeIdx ? "#222" : "transparent",
                 }}
               >
@@ -220,7 +180,7 @@ export default function Product() {
         </div>
       </div>
 
-      {/* Bottom Player */}
+      {/* SIMPLE PLAYER */}
       <div
         style={{
           position: "fixed",
@@ -228,15 +188,17 @@ export default function Product() {
           right: 0,
           bottom: 0,
           padding: 16,
-          background: "rgba(0,0,0,0.85)",
+          background: "rgba(0,0,0,0.9)",
           display: "flex",
           alignItems: "center",
           gap: 12,
         }}
       >
-        <button onClick={toggle}>
-          {playing ? "Pause" : "Play"}
-        </button>
+        {!playing ? (
+          <button onClick={play}>Play</button>
+        ) : (
+          <button onClick={pause}>Pause</button>
+        )}
         <div>{active?.title || "—"}</div>
         <div style={{ marginLeft: "auto" }}>
           {fmt(cur)} / {fmt(dur)}
@@ -246,3 +208,4 @@ export default function Product() {
     </div>
   );
 }
+
