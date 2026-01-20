@@ -3,9 +3,9 @@ import { useParams } from "react-router-dom";
 
 /**
  * RECEIVER (LOCKED)
- * - Truth: S3 public manifest only
- * - Player: click track = select+load, click Play = audio.play()
- * BUILD: RECEIVER-FINAL-2026-01-20
+ * Truth: S3 public manifest only
+ * Player: audio element is truth; user actions drive playback
+ * BUILD: RECEIVER-LOCKED-PLAYER-V2-2026-01-20
  */
 
 const S3_MANIFEST_BASE =
@@ -30,13 +30,24 @@ export default function Product() {
 
   const [activeIdx, setActiveIdx] = useState(0);
 
-  // UI derives from audio element; React does not "drive" playback.
+  // audio truth
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
 
-  // ===== Load manifest (S3 only) =====
+  // scrub UI without fighting audio updates
+  const [scrubVal, setScrubVal] = useState(0);
+  const [scrubbing, setScrubbing] = useState(false);
+
+  const tracks = useMemo(() => {
+    const t = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
+    return [...t].sort((a, b) => Number(a?.slot || 0) - Number(b?.slot || 0));
+  }, [manifest]);
+
+  const active = tracks[activeIdx] || null;
+
+  // load manifest (S3 only)
   useEffect(() => {
     let cancel = false;
     async function run() {
@@ -62,43 +73,24 @@ export default function Product() {
     };
   }, [shareId]);
 
-  const tracks = useMemo(() => {
-    const t = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
-    return [...t].sort((a, b) => (Number(a?.slot || 0) - Number(b?.slot || 0)));
-  }, [manifest]);
-
-  const active = tracks[activeIdx] || null;
-
-  // ===== Load track on selection (NO autoplay) =====
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-
-    const url = String(active?.playbackUrl || "");
-    if (!url) return;
-
-    a.pause(); // stop current audio deterministically
-    a.src = url;
-    a.load();
-
-    setPlaying(false);
-    setCur(0);
-    setDur(0);
-  }, [active?.playbackUrl]);
-
-  // ===== Audio element events (single source of truth for play state) =====
+  // audio events (audio is truth)
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
 
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    const onTime = () => setCur(a.currentTime || 0);
-    const onMeta = () => setDur(a.duration || 0);
-    const onEnded = () => {
-      // optional: stay on same track; require explicit play again
-      setPlaying(false);
+    const onTime = () => {
+      const t = a.currentTime || 0;
+      setCur(t);
+      if (!scrubbing) setScrubVal(t);
     };
+    const onMeta = () => {
+      const d = a.duration || 0;
+      setDur(d);
+      if (!scrubbing) setScrubVal(a.currentTime || 0);
+    };
+    const onEnded = () => setPlaying(false);
 
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
@@ -113,15 +105,40 @@ export default function Product() {
       a.removeEventListener("loadedmetadata", onMeta);
       a.removeEventListener("ended", onEnded);
     };
-  }, []);
+  }, [scrubbing]);
+
+  function loadTrack(idx, { autoplay } = { autoplay: false }) {
+    const a = audioRef.current;
+    const t = tracks[idx];
+    if (!a || !t?.playbackUrl) return;
+
+    // deterministic stop+swap
+    a.pause();
+    a.src = String(t.playbackUrl);
+    a.load();
+
+    setCur(0);
+    setDur(0);
+    setScrubVal(0);
+
+    if (autoplay) {
+      a.play().catch(() => setPlaying(false));
+    } else {
+      setPlaying(false);
+    }
+  }
+
+  // when active changes: load only (no autoplay)
+  useEffect(() => {
+    if (!tracks.length) return;
+    loadTrack(activeIdx, { autoplay: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIdx, tracks.length]);
 
   function play() {
     const a = audioRef.current;
     if (!a) return;
-    a.play().catch(() => {
-      // If browser blocks autoplay, user can click again; UI stays paused.
-      setPlaying(false);
-    });
+    a.play().catch(() => setPlaying(false));
   }
 
   function pause() {
@@ -130,19 +147,49 @@ export default function Product() {
     a.pause();
   }
 
-  function scrub(e) {
-    const a = audioRef.current;
-    if (!a) return;
+  function toggle() {
+    if (playing) pause();
+    else play();
+  }
+
+  function next() {
+    if (!tracks.length) return;
+    const wasPlaying = playing;
+    const idx = Math.min(tracks.length - 1, activeIdx + 1);
+    setActiveIdx(idx);
+    // autoplay if currently playing
+    setTimeout(() => loadTrack(idx, { autoplay: wasPlaying }), 0);
+  }
+
+  function prev() {
+    if (!tracks.length) return;
+    const wasPlaying = playing;
+    const idx = Math.max(0, activeIdx - 1);
+    setActiveIdx(idx);
+    setTimeout(() => loadTrack(idx, { autoplay: wasPlaying }), 0);
+  }
+
+  function onScrubChange(e) {
     const v = Number(e.target.value || 0);
-    a.currentTime = v;
-    setCur(v);
+    setScrubVal(v);
+  }
+
+  function onScrubStart() {
+    setScrubbing(true);
+  }
+
+  function onScrubEnd() {
+    const a = audioRef.current;
+    if (a) a.currentTime = Number(scrubVal || 0);
+    setCur(Number(scrubVal || 0));
+    setScrubbing(false);
   }
 
   if (err) {
     return (
       <div style={{ padding: 24 }}>
         <div style={{ fontSize: 12, opacity: 0.6 }}>
-          BUILD: RECEIVER-FINAL-2026-01-20
+          BUILD: RECEIVER-LOCKED-PLAYER-V2-2026-01-20
         </div>
         <div style={{ fontSize: 20, fontWeight: 800, marginTop: 10 }}>
           Failed to load
@@ -164,9 +211,9 @@ export default function Product() {
   const cover = String(manifest?.coverUrl || "");
 
   return (
-    <div style={{ padding: 24, paddingBottom: 120 }}>
+    <div style={{ padding: 24, paddingBottom: 130 }}>
       <div style={{ fontSize: 12, opacity: 0.6 }}>
-        BUILD: RECEIVER-FINAL-2026-01-20
+        BUILD: RECEIVER-LOCKED-PLAYER-V2-2026-01-20
       </div>
 
       <h1 style={{ fontSize: 36, fontWeight: 800, margin: "10px 0 16px" }}>
@@ -182,7 +229,7 @@ export default function Product() {
           alignItems: "start",
         }}
       >
-        {/* LEFT: COVER CARD (full bleed image) */}
+        {/* LEFT: COVER */}
         <div
           style={{
             borderRadius: 16,
@@ -209,7 +256,6 @@ export default function Product() {
 
         {/* RIGHT: INFO + BUY + MARKETING + TRACKS */}
         <div style={{ display: "grid", gap: 12 }}>
-          {/* Album Info (top right) */}
           <div style={{ padding: 16, border: "1px solid #333", borderRadius: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 10 }}>Album Info</div>
             <div style={{ display: "grid", gap: 8 }}>
@@ -228,7 +274,6 @@ export default function Product() {
             </div>
           </div>
 
-          {/* Buy button */}
           <button
             style={{
               padding: 14,
@@ -244,7 +289,6 @@ export default function Product() {
             Buy — $19.50
           </button>
 
-          {/* Marketing card under Buy */}
           <div style={{ padding: 16, border: "1px solid #333", borderRadius: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>What you get</div>
             <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 6 }}>
@@ -255,7 +299,6 @@ export default function Product() {
             </ul>
           </div>
 
-          {/* Tracks list (right column) */}
           <div style={{ padding: 16, border: "1px solid #333", borderRadius: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 10 }}>Tracks</div>
 
@@ -291,7 +334,7 @@ export default function Product() {
         </div>
       </div>
 
-      {/* PLAYER (locked to old compact bar layout) */}
+      {/* PLAYER (compact, old layout) */}
       <div
         style={{
           position: "fixed",
@@ -308,49 +351,63 @@ export default function Product() {
             maxWidth: 1100,
             margin: "0 auto",
             display: "grid",
-            gridTemplateColumns: "140px 1fr 140px",
+            gridTemplateColumns: "220px 1fr 140px",
             gap: 12,
             alignItems: "center",
           }}
         >
-          {/* LEFT: PLAY/PAUSE */}
-          <div>
-            {!playing ? (
-              <button
-                onClick={play}
-                style={{
-                  height: 42,
-                  padding: "0 16px",
-                  borderRadius: 999,
-                  border: "1px solid #333",
-                  background: "#111",
-                  color: "inherit",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-              >
-                Play
-              </button>
-            ) : (
-              <button
-                onClick={pause}
-                style={{
-                  height: 42,
-                  padding: "0 16px",
-                  borderRadius: 999,
-                  border: "1px solid #333",
-                  background: "#111",
-                  color: "inherit",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-              >
-                Pause
-              </button>
-            )}
+          {/* LEFT: CONTROLS */}
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={prev}
+              style={{
+                height: 42,
+                padding: "0 12px",
+                borderRadius: 999,
+                border: "1px solid #333",
+                background: "#111",
+                color: "inherit",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Prev
+            </button>
+
+            <button
+              onClick={toggle}
+              style={{
+                height: 42,
+                padding: "0 16px",
+                borderRadius: 999,
+                border: "1px solid #333",
+                background: "#111",
+                color: "inherit",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              {playing ? "Pause" : "Play"}
+            </button>
+
+            <button
+              onClick={next}
+              style={{
+                height: 42,
+                padding: "0 12px",
+                borderRadius: 999,
+                border: "1px solid #333",
+                background: "#111",
+                color: "inherit",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Next
+            </button>
           </div>
 
-          {/* CENTER: TITLE + SCRUB */}
+          {/* CENTER: NOW PLAYING + SCRUB */}
           <div style={{ minWidth: 0 }}>
             <div
               style={{
@@ -359,17 +416,23 @@ export default function Product() {
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 textAlign: "center",
+                marginBottom: 6,
               }}
             >
-              {active?.title || "—"}
+              Now Playing: {active?.title || "—"}
             </div>
+
             <input
               type="range"
               min={0}
               max={Math.max(0, dur || 0)}
               step="0.25"
-              value={Math.min(cur, dur || 0)}
-              onChange={scrub}
+              value={Math.min(scrubVal, dur || 0)}
+              onMouseDown={onScrubStart}
+              onTouchStart={onScrubStart}
+              onChange={onScrubChange}
+              onMouseUp={onScrubEnd}
+              onTouchEnd={onScrubEnd}
               style={{ width: "100%" }}
             />
           </div>
@@ -379,11 +442,16 @@ export default function Product() {
             {fmt(cur)} / {fmt(dur)}
           </div>
 
-          {/* Hidden audio element (single) */}
           <audio ref={audioRef} preload="metadata" />
         </div>
       </div>
     </div>
   );
 }
+
+cd ~/Desktop/betablocker
+git add src/pages/Product.jsx
+git commit -m "Receiver: add prev/next/pause + scrub (keep playing on next)"
+git push
+
 
